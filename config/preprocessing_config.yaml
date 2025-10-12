@@ -1,0 +1,61 @@
+# Preprocessing Configuration
+preprocessing:
+  # Phase 1: Stay ID Identification
+  phase1:
+    extended_window_days: 7
+    chunk_size: 1000
+    parallel_chunks: true
+    
+  # Phase 2: Clinical Data Extraction
+  phase2:
+    lab_lookback_hours: 24
+    medication_lookback_hours: 48
+    extract_diagnoses: true
+    extract_procedures: true
+    
+  # Phase 3: Integration
+  phase3:
+    create_patient_folders: true
+    copy_images: true
+    image_format: jpg
+    compress_output: false
+
+# Data Paths (relative to buckets)
+data_paths:
+  mimic_iv:
+    prefix: "mimic-iv/2.2/"
+    patients: "hosp/patients.csv.gz"
+    admissions: "hosp/admissions.csv.gz"
+    diagnoses: "hosp/diagnoses_icd.csv.gz"
+    labevents: "hosp/labevents.csv.gz"
+    prescriptions: "hosp/prescriptions.csv.gz"
+    
+  mimic_ed:
+    prefix: "mimic-iv-ed/2.2/"
+    edstays: "ed/edstays.csv.gz"
+    triage: "ed/triage.csv.gz"
+    vitalsign: "ed/vitalsign.csv.gz"
+    diagnosis: "ed/diagnosis.csv.gz"
+    
+  mimic_cxr:
+    prefix: "mimic-cxr-jpg/2.0.0/"
+    metadata: "mimic-cxr-2.0.0-metadata.csv.gz"
+    chexpert: "mimic-cxr-2.0.0-chexpert.csv.gz"
+    negbio: "mimic-cxr-2.0.0-negbio.csv.gz"
+    split: "mimic-cxr-2.0.0-split.csv.gz"
+
+# Processing Options
+processing:
+  parallel_workers: 10
+  batch_size: 100
+  memory_per_worker_mb: 8192
+  timeout_minutes: 60
+  retry_attempts: 3
+  use_spot_instances: true
+
+# Logging
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  log_to_file: true
+  log_dir: "logs"

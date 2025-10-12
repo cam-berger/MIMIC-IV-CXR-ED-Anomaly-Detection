@@ -1,0 +1,48 @@
+# AWS Configuration
+aws:
+  region: us-east-1
+  profile: default
+  account_id: "cmberger"  # Replace with your AWS account ID
+  
+  # S3 Buckets
+  s3:
+    # Source bucket (MIMIC data on AWS Open Data)
+    mimic_bucket: physionet-open
+    
+    # Your buckets (create these in AWS)
+    output_bucket: "mimic-processed-data-cmberger"
+    temp_bucket: "mimic-temp-processing-cmberger"
+    
+  # Batch Configuration
+  batch:
+    compute_environment: mimic-preprocessing-env
+    job_queue: mimic-preprocessing-queue
+    job_definition: mimic-preprocess-job
+    
+    # Resource configuration
+    max_vcpus: 256
+    min_vcpus: 0
+    desired_vcpus: 0
+    instance_types:
+      - optimal
+    
+  # EC2 Configuration
+  ec2:
+    # VPC settings (replace with your VPC)
+    vpc_id: "vpc-xxxxx"
+    subnet_ids:
+      - "subnet-xxxxx"
+      - "subnet-yyyyy"
+    security_group_ids:
+      - "sg-xxxxx"
+      
+  # IAM Roles (will be created)
+  iam:
+    batch_service_role: "BatchServiceRole"
+    batch_instance_profile: "ecsInstanceRole"
+    batch_job_role: "BatchJobRole"
+
+# Docker Configuration
+docker:
+  ecr_repository: mimic-preprocessor
+  image_tag: latest
