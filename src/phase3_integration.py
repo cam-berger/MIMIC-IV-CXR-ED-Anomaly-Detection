@@ -1,396 +1,478 @@
-#!/bin/bash
+"""
+Phase 3: Integration
+Creates patient-level folder structure and integrates all modalities
+"""
 
-# AWS Setup Script for MIMIC Preprocessing Pipeline
-# This script creates all necessary AWS resources
+import os
+import json
+import pandas as pd
+from pathlib import Path
+from typing import Dict, List, Optional
+from loguru import logger
+from tqdm import tqdm
 
-set -e  # Exit on error
+from .config_manager import get_config
+from .utils import S3Handler
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
 
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}MIMIC Preprocessing AWS Setup${NC}"
-echo -e "${GREEN}========================================${NC}"
-
-# Check if AWS CLI is installed
-if ! command -v aws &> /dev/null; then
-    echo -e "${RED}Error: AWS CLI is not installed${NC}"
-    exit 1
-fi
-
-# Load configuration
-source .env || {
-    echo -e "${RED}Error: .env file not found${NC}"
-    echo -e "${YELLOW}Please copy .env.example to .env and configure it${NC}"
-    exit 1
-}
-
-# Validate required variables
-if [ -z "$AWS_ACCOUNT_ID" ] || [ -z "$AWS_REGION" ]; then
-    echo -e "${RED}Error: AWS_ACCOUNT_ID and AWS_REGION must be set in .env${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}Using AWS Account: $AWS_ACCOUNT_ID${NC}"
-echo -e "${GREEN}Region: $AWS_REGION${NC}"
-echo ""
-
-# Function to check if resource exists
-resource_exists() {
-    local resource_type=$1
-    local resource_name=$2
+class DataIntegrator:
+    """Integrate all modalities into patient-level folders"""
     
-    case $resource_type in
-        "s3")
-            aws s3 ls "s3://$resource_name" &> /dev/null
-            ;;
-        "iam-role")
-            aws iam get-role --role-name "$resource_name" &> /dev/null
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-# Step 1: Create S3 Buckets
-echo -e "${YELLOW}Step 1: Creating S3 Buckets...${NC}"
-
-create_bucket() {
-    local bucket_name=$1
-    
-    if resource_exists "s3" "$bucket_name"; then
-        echo -e "  Bucket $bucket_name already exists"
-    else
-        echo -e "  Creating bucket: $bucket_name"
+    def __init__(self):
+        """Initialize Data Integrator"""
+        self.config = get_config()
+        self.s3 = S3Handler(
+            region=self.config.get('aws.region'),
+            profile=self.config.get('aws.profile')
+        )
+        self.copy_images = self.config.get(
+            'preprocessing.phase3.copy_images', True
+        )
         
-        if [ "$AWS_REGION" == "us-east-1" ]; then
-            aws s3 mb "s3://$bucket_name" --region "$AWS_REGION"
-        else
-            aws s3 mb "s3://$bucket_name" --region "$AWS_REGION" \
-                --create-bucket-configuration LocationConstraint="$AWS_REGION"
-        fi
+        logger.info("Data Integrator initialized")
+    
+    def create_patient_folder_structure(
+        self,
+        bucket: str,
+        subject_id: int
+    ):
+        """
+        Create folder structure for a patient in S3
         
-        # Enable versioning
-        aws s3api put-bucket-versioning \
-            --bucket "$bucket_name" \
-            --versioning-configuration Status=Enabled
+        Args:
+            bucket: S3 bucket name
+            subject_id: Patient ID
+        """
+        prefix = f"processed/patient_{subject_id}/"
         
-        echo -e "${GREEN}  ✓ Created bucket: $bucket_name${NC}"
-    fi
-}
-
-create_bucket "$OUTPUT_BUCKET"
-create_bucket "$TEMP_BUCKET"
-
-# Step 2: Create IAM Roles
-echo -e "\n${YELLOW}Step 2: Creating IAM Roles...${NC}"
-
-# Batch Service Role
-echo -e "  Creating Batch Service Role..."
-
-if resource_exists "iam-role" "BatchServiceRole"; then
-    echo -e "  BatchServiceRole already exists"
-else
-    cat > /tmp/batch-service-role-trust.json << EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Service": "batch.amazonaws.com"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-EOF
-
-    aws iam create-role \
-        --role-name BatchServiceRole \
-        --assume-role-policy-document file:///tmp/batch-service-role-trust.json
-
-    aws iam attach-role-policy \
-        --role-name BatchServiceRole \
-        --policy-arn arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole
-
-    echo -e "${GREEN}  ✓ Created BatchServiceRole${NC}"
-fi
-
-# ECS Instance Role
-echo -e "  Creating ECS Instance Role..."
-
-if resource_exists "iam-role" "ecsInstanceRole"; then
-    echo -e "  ecsInstanceRole already exists"
-else
-    cat > /tmp/ecs-instance-role-trust.json << EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Service": "ec2.amazonaws.com"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-EOF
-
-    aws iam create-role \
-        --role-name ecsInstanceRole \
-        --assume-role-policy-document file:///tmp/ecs-instance-role-trust.json
-
-    aws iam attach-role-policy \
-        --role-name ecsInstanceRole \
-        --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
-
-    # Create instance profile
-    aws iam create-instance-profile --instance-profile-name ecsInstanceRole
-    aws iam add-role-to-instance-profile \
-        --instance-profile-name ecsInstanceRole \
-        --role-name ecsInstanceRole
-
-    echo -e "${GREEN}  ✓ Created ecsInstanceRole${NC}"
-fi
-
-# Batch Job Role
-echo -e "  Creating Batch Job Role..."
-
-if resource_exists "iam-role" "BatchJobRole"; then
-    echo -e "  BatchJobRole already exists"
-else
-    cat > /tmp/batch-job-role-trust.json << EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Service": "ecs-tasks.amazonaws.com"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-EOF
-
-    aws iam create-role \
-        --role-name BatchJobRole \
-        --assume-role-policy-document file:///tmp/batch-job-role-trust.json
-
-    # Create policy for S3 access
-    cat > /tmp/batch-job-policy.json << EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:ListBucket"
-      ],
-      "Resource": [
-        "arn:aws:s3:::physionet-open/*",
-        "arn:aws:s3:::$OUTPUT_BUCKET/*",
-        "arn:aws:s3:::$TEMP_BUCKET/*",
-        "arn:aws:s3:::$OUTPUT_BUCKET",
-        "arn:aws:s3:::$TEMP_BUCKET"
-      ]
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream",
-        "logs:PutLogEvents"
-      ],
-      "Resource": "arn:aws:logs:*:*:*"
-    }
-  ]
-}
-EOF
-
-    aws iam put-role-policy \
-        --role-name BatchJobRole \
-        --policy-name BatchJobS3Access \
-        --policy-document file:///tmp/batch-job-policy.json
-
-    echo -e "${GREEN}  ✓ Created BatchJobRole${NC}"
-fi
-
-# Step 3: Create VPC and Security Group (if needed)
-echo -e "\n${YELLOW}Step 3: Setting up VPC and Security Group...${NC}"
-
-# Get default VPC
-DEFAULT_VPC=$(aws ec2 describe-vpcs \
-    --filters "Name=isDefault,Values=true" \
-    --query "Vpcs[0].VpcId" \
-    --output text)
-
-if [ "$DEFAULT_VPC" == "None" ] || [ -z "$DEFAULT_VPC" ]; then
-    echo -e "${RED}  Error: No default VPC found${NC}"
-    echo -e "${YELLOW}  Please create a VPC manually or use an existing one${NC}"
-    exit 1
-fi
-
-echo -e "  Using VPC: $DEFAULT_VPC"
-
-# Get subnets
-SUBNETS=$(aws ec2 describe-subnets \
-    --filters "Name=vpc-id,Values=$DEFAULT_VPC" \
-    --query "Subnets[*].SubnetId" \
-    --output text)
-
-echo -e "  Found subnets: $SUBNETS"
-
-# Create security group
-SG_NAME="mimic-preprocessing-sg"
-SG_ID=$(aws ec2 describe-security-groups \
-    --filters "Name=group-name,Values=$SG_NAME" "Name=vpc-id,Values=$DEFAULT_VPC" \
-    --query "SecurityGroups[0].GroupId" \
-    --output text 2>/dev/null)
-
-if [ "$SG_ID" == "None" ] || [ -z "$SG_ID" ]; then
-    echo -e "  Creating security group: $SG_NAME"
+        # Create placeholder files to establish folder structure
+        folders = [
+            'ED/',
+            'Hosp/',
+            'CXR-JPG/',
+            'metadata/'
+        ]
+        
+        for folder in folders:
+            key = f"{prefix}{folder}.placeholder"
+            try:
+                self.s3.s3_client.put_object(
+                    Bucket=bucket,
+                    Key=key,
+                    Body=b''
+                )
+            except Exception as e:
+                logger.warning(f"Could not create folder {folder}: {str(e)}")
     
-    SG_ID=$(aws ec2 create-security-group \
-        --group-name "$SG_NAME" \
-        --description "Security group for MIMIC preprocessing" \
-        --vpc-id "$DEFAULT_VPC" \
-        --query "GroupId" \
-        --output text)
+    def save_patient_metadata(
+        self,
+        bucket: str,
+        subject_id: int,
+        patient_records: List[Dict]
+    ):
+        """
+        Save patient metadata as JSON
+        
+        Args:
+            bucket: S3 bucket name
+            subject_id: Patient ID
+            patient_records: List of patient records
+        """
+        prefix = f"processed/patient_{subject_id}/"
+        key = f"{prefix}metadata/patient_data.json"
+        
+        try:
+            # Convert to JSON-serializable format
+            serializable_records = []
+            for record in patient_records:
+                serializable_record = {}
+                for k, v in record.items():
+                    # Handle pandas/numpy types
+                    if pd.isna(v):
+                        serializable_record[k] = None
+                    elif isinstance(v, (pd.Timestamp, pd.DatetimeTZDtype)):
+                        serializable_record[k] = str(v)
+                    elif hasattr(v, 'item'):  # numpy types
+                        serializable_record[k] = v.item()
+                    else:
+                        serializable_record[k] = v
+                serializable_records.append(serializable_record)
+            
+            # Convert to JSON
+            json_data = json.dumps(serializable_records, indent=2, default=str)
+            
+            # Upload to S3
+            self.s3.s3_client.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=json_data.encode('utf-8')
+            )
+            
+            logger.debug(f"Saved metadata for patient {subject_id}")
+            
+        except Exception as e:
+            logger.error(f"Error saving metadata for patient {subject_id}: {str(e)}")
+            raise
     
-    # Allow outbound traffic (needed for S3 access)
-    aws ec2 authorize-security-group-egress \
-        --group-id "$SG_ID" \
-        --protocol all \
-        --port all \
-        --cidr 0.0.0.0/0 2>/dev/null || true
+    def copy_cxr_images(
+        self,
+        subject_id: int,
+        patient_records: List[Dict],
+        source_bucket: str,
+        dest_bucket: str
+    ):
+        """
+        Copy CXR images to patient folder
+        
+        Args:
+            subject_id: Patient ID
+            patient_records: List of patient records
+            source_bucket: Source S3 bucket (MIMIC)
+            dest_bucket: Destination S3 bucket
+        """
+        images_copied = 0
+        images_failed = 0
+        
+        for record in patient_records:
+            dicom_id = None  # Initialize to avoid unbound variable
+            try:
+                study_id = record['study_id']
+                dicom_id = record['dicom_id']
+
+                # Construct source path
+                # MIMIC-CXR-JPG structure: files/p10/p10000032/s50414267/02aa804e-bde0afdd-112c0b34-7bc16630-4e384014.jpg
+                p_dir = f"p{str(subject_id)[:2]}"
+                source_key = (
+                    f"mimic-cxr-jpg/2.0.0/files/"
+                    f"{p_dir}/p{subject_id}/s{study_id}/{dicom_id}.jpg"
+                )
+
+                # Construct destination path
+                dest_key = (
+                    f"processed/patient_{subject_id}/"
+                    f"CXR-JPG/s{study_id}_{dicom_id}.jpg"
+                )
+
+                # Check if source exists
+                if not self.s3.object_exists(source_bucket, source_key):
+                    logger.warning(f"Source image not found: {source_key}")
+                    images_failed += 1
+                    continue
+
+                # Copy image
+                self.s3.copy_object(
+                    source_bucket,
+                    source_key,
+                    dest_bucket,
+                    dest_key
+                )
+
+                images_copied += 1
+
+            except Exception as e:
+                logger.error(f"Error copying image {dicom_id if dicom_id else 'unknown'}: {str(e)}")
+                images_failed += 1
+                continue
+        
+        logger.info(f"Patient {subject_id}: Copied {images_copied} images, {images_failed} failed")
     
-    echo -e "${GREEN}  ✓ Created security group: $SG_ID${NC}"
-else
-    echo -e "  Security group already exists: $SG_ID"
-fi
-
-# Step 4: Create ECR Repository
-echo -e "\n${YELLOW}Step 4: Creating ECR Repository...${NC}"
-
-ECR_REPO_NAME="mimic-preprocessor"
-
-if aws ecr describe-repositories --repository-names "$ECR_REPO_NAME" &> /dev/null; then
-    echo -e "  ECR repository already exists: $ECR_REPO_NAME"
-else
-    aws ecr create-repository \
-        --repository-name "$ECR_REPO_NAME" \
-        --image-scanning-configuration scanOnPush=true
+    def save_patient_csv_data(
+        self,
+        bucket: str,
+        subject_id: int,
+        patient_records_df: pd.DataFrame
+    ):
+        """
+        Save patient data as CSV for easier access
+        
+        Args:
+            bucket: S3 bucket name
+            subject_id: Patient ID
+            patient_records_df: DataFrame with patient records
+        """
+        prefix = f"processed/patient_{subject_id}/"
+        
+        try:
+            # Save main records CSV
+            records_key = f"{prefix}metadata/records.csv"
+            self.s3.write_csv(patient_records_df, bucket, records_key)
+            
+            # Extract and save clinical features if available
+            if 'clinical_features' in patient_records_df.columns:
+                clinical_data = []
+                for idx, row in patient_records_df.iterrows():
+                    if row['clinical_features'] and isinstance(row['clinical_features'], dict):
+                        clinical_data.append(row['clinical_features'])
+                
+                if clinical_data:
+                    clinical_df = pd.DataFrame(clinical_data)
+                    clinical_key = f"{prefix}metadata/clinical_features.csv"
+                    self.s3.write_csv(clinical_df, bucket, clinical_key)
+                    logger.debug(f"Saved clinical features for patient {subject_id}")
+            
+        except Exception as e:
+            logger.error(f"Error saving CSV data for patient {subject_id}: {str(e)}")
     
-    echo -e "${GREEN}  ✓ Created ECR repository: $ECR_REPO_NAME${NC}"
-fi
-
-ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}"
-echo -e "  ECR URI: $ECR_URI"
-
-# Step 5: Create AWS Batch Compute Environment
-echo -e "\n${YELLOW}Step 5: Creating AWS Batch Compute Environment...${NC}"
-
-COMPUTE_ENV_NAME="mimic-preprocessing-env"
-
-if aws batch describe-compute-environments \
-    --compute-environments "$COMPUTE_ENV_NAME" \
-    --query "computeEnvironments[0].computeEnvironmentName" \
-    --output text 2>/dev/null | grep -q "$COMPUTE_ENV_NAME"; then
-    echo -e "  Compute environment already exists: $COMPUTE_ENV_NAME"
-else
-    # Convert subnets to JSON array
-    SUBNET_ARRAY=$(echo $SUBNETS | tr ' ' '\n' | jq -R . | jq -s .)
+    def process_patient(
+        self,
+        subject_id: int,
+        patient_records: List[Dict]
+    ):
+        """
+        Process and integrate data for a single patient
+        
+        Args:
+            subject_id: Patient ID
+            patient_records: List of records for this patient
+        """
+        output_bucket = self.config.get('aws.s3.output_bucket')
+        mimic_bucket = self.config.get('aws.s3.mimic_bucket')
+        
+        logger.debug(f"Processing patient {subject_id} with {len(patient_records)} records")
+        
+        try:
+            # Create folder structure
+            self.create_patient_folder_structure(output_bucket, subject_id)
+            
+            # Save metadata as JSON
+            self.save_patient_metadata(output_bucket, subject_id, patient_records)
+            
+            # Save as CSV
+            patient_df = pd.DataFrame(patient_records)
+            self.save_patient_csv_data(output_bucket, subject_id, patient_df)
+            
+            # Copy images if enabled
+            if self.copy_images:
+                self.copy_cxr_images(
+                    subject_id,
+                    patient_records,
+                    mimic_bucket,
+                    output_bucket
+                )
+            
+            logger.debug(f"Successfully processed patient {subject_id}")
+            
+        except Exception as e:
+            logger.error(f"Error processing patient {subject_id}: {str(e)}")
+            raise
     
-    cat > /tmp/compute-env.json << EOF
-{
-  "computeEnvironmentName": "$COMPUTE_ENV_NAME",
-  "type": "MANAGED",
-  "state": "ENABLED",
-  "computeResources": {
-    "type": "EC2",
-    "minvCpus": 0,
-    "maxvCpus": 256,
-    "desiredvCpus": 0,
-    "instanceTypes": ["optimal"],
-    "subnets": $SUBNET_ARRAY,
-    "securityGroupIds": ["$SG_ID"],
-    "instanceRole": "arn:aws:iam::${AWS_ACCOUNT_ID}:instance-profile/ecsInstanceRole"
-  },
-  "serviceRole": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/BatchServiceRole"
-}
-EOF
-
-    aws batch create-compute-environment --cli-input-json file:///tmp/compute-env.json
+    def create_master_index(
+        self,
+        all_records: pd.DataFrame
+    ):
+        """
+        Create master index of all patients and records
+        
+        Args:
+            all_records: DataFrame with all patient records
+        """
+        output_bucket = self.config.get('aws.s3.output_bucket')
+        
+        try:
+            # Create summary statistics
+            summary = {
+                'total_patients': int(all_records['subject_id'].nunique()),
+                'total_records': int(len(all_records)),
+                'total_stays': int(all_records['stay_id'].nunique()),
+                'processing_date': pd.Timestamp.now().isoformat(),
+                'patients_with_clinical_data': int(
+                    all_records['clinical_features'].notna().sum()
+                ),
+                'average_records_per_patient': float(
+                    len(all_records) / all_records['subject_id'].nunique()
+                )
+            }
+            
+            # Save summary
+            summary_key = 'processed/summary.json'
+            self.s3.s3_client.put_object(
+                Bucket=output_bucket,
+                Key=summary_key,
+                Body=json.dumps(summary, indent=2).encode('utf-8')
+            )
+            
+            logger.info(f"Created summary with {summary['total_patients']} patients")
+            
+            # Save master index
+            # Remove complex nested columns for CSV
+            index_df = all_records.copy()
+            
+            # Flatten clinical features
+            if 'clinical_features' in index_df.columns:
+                index_df['has_clinical_data'] = index_df['clinical_features'].notna()
+                index_df = index_df.drop(columns=['clinical_features'])
+            
+            # Flatten other complex columns
+            for col in ['lab_summary', 'medication_summary']:
+                if col in index_df.columns:
+                    index_df = index_df.drop(columns=[col])
+            
+            index_key = 'processed/master_index.csv'
+            self.s3.write_csv(index_df, output_bucket, index_key)
+            
+            logger.info(f"Created master index with {len(all_records)} records")
+            
+        except Exception as e:
+            logger.error(f"Error creating master index: {str(e)}")
+            raise
     
-    echo -e "${GREEN}  ✓ Created compute environment: $COMPUTE_ENV_NAME${NC}"
-    echo -e "  Waiting for compute environment to become VALID..."
+    def create_patient_list(
+        self,
+        all_records: pd.DataFrame
+    ):
+        """
+        Create a simple list of all patients with counts
+        
+        Args:
+            all_records: DataFrame with all patient records
+        """
+        output_bucket = self.config.get('aws.s3.output_bucket')
+        
+        try:
+            # Group by patient
+            patient_summary = all_records.groupby('subject_id').agg({
+                'dicom_id': 'count',
+                'stay_id': 'nunique',
+                'study_datetime': ['min', 'max']
+            }).reset_index()
+            
+            patient_summary.columns = [
+                'subject_id',
+                'total_cxrs',
+                'total_stays',
+                'first_cxr',
+                'last_cxr'
+            ]
+            
+            # Save patient list
+            patient_list_key = 'processed/patient_list.csv'
+            self.s3.write_csv(patient_summary, output_bucket, patient_list_key)
+            
+            logger.info(f"Created patient list with {len(patient_summary)} patients")
+            
+        except Exception as e:
+            logger.error(f"Error creating patient list: {str(e)}")
     
-    aws batch wait compute-environment-valid --compute-environments "$COMPUTE_ENV_NAME"
-fi
+    def run(self):
+        """Execute Phase 3: Integration"""
+        logger.info("="*60)
+        logger.info("Starting Phase 3: Data Integration")
+        logger.info("="*60)
+        
+        # Load Phase 2 results
+        output_bucket = self.config.get('aws.s3.output_bucket')
+        input_key = 'processing/patient_clinical_data.csv'
+        
+        logger.info(f"Loading Phase 2 results from s3://{output_bucket}/{input_key}")
+        
+        try:
+            patient_data = self.s3.read_csv(output_bucket, input_key)
+        except Exception as e:
+            logger.error(f"Failed to load Phase 2 results: {str(e)}")
+            raise
+        
+        if len(patient_data) == 0:
+            logger.error("No data found in Phase 2 results")
+            raise ValueError("Phase 2 results are empty")
+        
+        # Group by patient
+        unique_patients = patient_data['subject_id'].nunique()
+        logger.info(f"Processing {unique_patients} patients with {len(patient_data)} total records")
+        
+        # Process each patient
+        processed_count = 0
+        failed_count = 0
+        
+        for subject_id, records_df in tqdm(
+            patient_data.groupby('subject_id'),
+            desc="Integrating patient data",
+            total=unique_patients
+        ):
+            try:
+                # Convert to list of dicts
+                patient_records = records_df.to_dict('records')
 
-# Step 6: Create Job Queue
-echo -e "\n${YELLOW}Step 6: Creating AWS Batch Job Queue...${NC}"
+                # Process patient - ensure subject_id is int
+                self.process_patient(int(subject_id), patient_records)
+                processed_count += 1
 
-JOB_QUEUE_NAME="mimic-preprocessing-queue"
-
-if aws batch describe-job-queues \
-    --job-queues "$JOB_QUEUE_NAME" \
-    --query "jobQueues[0].jobQueueName" \
-    --output text 2>/dev/null | grep -q "$JOB_QUEUE_NAME"; then
-    echo -e "  Job queue already exists: $JOB_QUEUE_NAME"
-else
-    aws batch create-job-queue \
-        --job-queue-name "$JOB_QUEUE_NAME" \
-        --state ENABLED \
-        --priority 1 \
-        --compute-environment-order order=1,computeEnvironment="$COMPUTE_ENV_NAME"
+            except Exception as e:
+                logger.error(f"Failed to process patient {subject_id}: {str(e)}")
+                failed_count += 1
+                continue
+        
+        logger.info(f"Processed {processed_count} patients, {failed_count} failed")
+        
+        # Create master index
+        logger.info("Creating master index...")
+        self.create_master_index(patient_data)
+        
+        # Create patient list
+        logger.info("Creating patient list...")
+        self.create_patient_list(patient_data)
+        
+        # Log statistics
+        self._log_statistics(patient_data, processed_count, failed_count)
+        
+        logger.info("Phase 3 complete!")
     
-    echo -e "${GREEN}  ✓ Created job queue: $JOB_QUEUE_NAME${NC}"
-fi
+    def _log_statistics(self, data: pd.DataFrame, processed: int, failed: int):
+        """Log integration statistics"""
+        total_patients = data['subject_id'].nunique()
+        total_records = len(data)
+        total_stays = data['stay_id'].nunique()
+        
+        logger.info("="*60)
+        logger.info("Phase 3 Statistics:")
+        logger.info(f"  Total patients:        {total_patients:,}")
+        logger.info(f"  Processed successfully: {processed:,}")
+        logger.info(f"  Failed:                {failed:,}")
+        logger.info(f"  Total records:         {total_records:,}")
+        logger.info(f"  Total ED stays:        {total_stays:,}")
+        logger.info(f"  Avg records/patient:   {total_records/total_patients:.2f}")
+        
+        if 'clinical_features' in data.columns:
+            with_clinical = data['clinical_features'].notna().sum()
+            logger.info(f"  Records with clinical: {with_clinical:,} ({with_clinical/total_records*100:.1f}%)")
+        
+        logger.info("="*60)
 
-# Step 7: Update .env with created resources
-echo -e "\n${YELLOW}Step 7: Updating .env file...${NC}"
 
-cat >> .env << EOF
+def main():
+    """Main entry point for Phase 3"""
+    import argparse
+    from .utils import setup_logging
+    
+    parser = argparse.ArgumentParser(
+        description='Phase 3: Integrate data into patient folders'
+    )
+    parser.add_argument(
+        '--log-level',
+        default='INFO',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        help='Logging level'
+    )
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Dry run - do not copy images'
+    )
+    
+    args = parser.parse_args()
+    
+    # Setup logging
+    setup_logging(log_level=args.log_level)
+    
+    # Run Phase 3
+    integrator = DataIntegrator()
+    
+    # Override copy_images if dry run
+    if args.dry_run:
+        logger.info("DRY RUN: Images will not be copied")
+        integrator.copy_images = False
+    
+    integrator.run()
 
-# Auto-generated AWS resources
-VPC_ID=$DEFAULT_VPC
-SUBNET_IDS=$SUBNETS
-SECURITY_GROUP_ID=$SG_ID
-ECR_REPOSITORY_URI=$ECR_URI
-COMPUTE_ENVIRONMENT_NAME=$COMPUTE_ENV_NAME
-JOB_QUEUE_NAME=$JOB_QUEUE_NAME
-EOF
 
-echo -e "${GREEN}  ✓ Updated .env file${NC}"
-
-# Step 8: Summary
-echo -e "\n${GREEN}========================================${NC}"
-echo -e "${GREEN}AWS Setup Complete!${NC}"
-echo -e "${GREEN}========================================${NC}"
-echo -e ""
-echo -e "Resources created:"
-echo -e "  - S3 Buckets: $OUTPUT_BUCKET, $TEMP_BUCKET"
-echo -e "  - IAM Roles: BatchServiceRole, ecsInstanceRole, BatchJobRole"
-echo -e "  - Security Group: $SG_ID"
-echo -e "  - ECR Repository: $ECR_URI"
-echo -e "  - Batch Compute Environment: $COMPUTE_ENV_NAME"
-echo -e "  - Batch Job Queue: $JOB_QUEUE_NAME"
-echo -e ""
-echo -e "${YELLOW}Next steps:${NC}"
-echo -e "  1. Build and push Docker image: ./scripts/deploy_to_aws.sh"
-echo -e "  2. Run preprocessing pipeline: python scripts/run_local.py"
-echo -e ""
-
-# Cleanup temp files
-rm -f /tmp/batch-*.json /tmp/ecs-*.json /tmp/compute-env.json
+if __name__ == '__main__':
+    main()
