@@ -1,8 +1,8 @@
 # AWS Configuration
 aws:
-  region: us-east-1
+  region: us-west-2
   profile: default
-  account_id: "cmberger"  # Replace with your AWS account ID
+  account_id: "851454408197"
   
   # S3 Buckets
   s3:
@@ -10,8 +10,8 @@ aws:
     mimic_bucket: physionet-open
     
     # Your buckets (create these in AWS)
-    output_bucket: "mimic-processed-data-cmberger"
-    temp_bucket: "mimic-temp-processing-cmberger"
+    output_bucket: "bergermimiciv"
+    temp_bucket: "bergermimiciv"
     
   # Batch Configuration
   batch:
@@ -46,3 +46,46 @@ aws:
 docker:
   ecr_repository: mimic-preprocessor
   image_tag: latest
+
+# Data paths on S3
+data_paths:
+  # CXR-PRO dataset (in your bucket after upload)
+  mimic_cxr:
+    bucket: "bergermimiciv"  # Override to use your bucket instead of physionet-open
+    prefix: "cxr-pro/1.0.0/"
+    h5_file: "cxr.h5"  # HDF5 file with images
+    train_impressions: "mimic_train_impressions.csv"
+    test_impressions: "mimic_test_impressions.csv"
+    metadata: "mimic_train_impressions.csv"  # Use train impressions as default metadata
+
+  mimic_ed:
+    bucket: "bergermimiciv"
+    prefix: "mimic-iv-ed/2.2/ed/"
+    edstays: "edstays.csv.gz"
+    diagnosis: "diagnosis.csv.gz"
+    pyxis: "pyxis.csv.gz"
+    triage: "triage.csv.gz"
+    vitalsign: "vitalsign.csv.gz"
+    medrecon: "medrecon.csv.gz"
+
+  mimic_iv:
+    prefix: "files/mimiciv/2.2/hosp/"
+    admissions: "admissions.csv.gz"
+    patients: "patients.csv.gz"
+    transfers: "transfers.csv.gz"
+    labevents: "labevents.csv.gz"
+    prescriptions: "prescriptions.csv.gz"
+    diagnoses_icd: "diagnoses_icd.csv.gz"
+    procedures_icd: "procedures_icd.csv.gz"
+    d_icd_diagnoses: "d_icd_diagnoses.csv.gz"
+    d_icd_procedures: "d_icd_procedures.csv.gz"
+    d_labitems: "d_labitems.csv.gz"
+
+  mimic_icu:
+    prefix: "files/mimiciv/2.2/icu/"
+    icustays: "icustays.csv.gz"
+    chartevents: "chartevents.csv.gz"
+    d_items: "d_items.csv.gz"
+    inputevents: "inputevents.csv.gz"
+    outputevents: "outputevents.csv.gz"
+    procedureevents: "procedureevents.csv.gz"

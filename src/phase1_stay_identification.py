@@ -159,19 +159,30 @@ class StayIdentifier:
             return self.s3.read_csv(temp_bucket, key)
         else:
             # Load full metadata
-            mimic_bucket = self.config.get('aws.s3.mimic_bucket')
+            # Check if custom bucket is specified for CXR data
+            custom_bucket = self.config.get('data_paths.mimic_cxr.bucket')
+            mimic_bucket = custom_bucket if custom_bucket else self.config.get('aws.s3.mimic_bucket')
+
             metadata_path = self.config.get_data_path('mimic_cxr', 'metadata')
             logger.info(f"Loading CXR metadata from s3://{mimic_bucket}/{metadata_path}")
-            return self.s3.read_csv(mimic_bucket, metadata_path, compression='gzip')
+
+            # CXR-PRO uses CSV without gzip compression
+            if 'cxr-pro' in metadata_path:
+                return self.s3.read_csv(mimic_bucket, metadata_path)
+            else:
+                return self.s3.read_csv(mimic_bucket, metadata_path, compression='gzip')
     
     def load_ed_stays(self) -> pd.DataFrame:
         """
         Load ED stays data from S3
-        
+
         Returns:
             DataFrame with ED stays
         """
-        mimic_bucket = self.config.get('aws.s3.mimic_bucket')
+        # Check if custom bucket is specified for ED data
+        custom_bucket = self.config.get('data_paths.mimic_ed.bucket')
+        mimic_bucket = custom_bucket if custom_bucket else self.config.get('aws.s3.mimic_bucket')
+
         edstays_path = self.config.get_data_path('mimic_ed', 'edstays')
         logger.info(f"Loading ED stays from s3://{mimic_bucket}/{edstays_path}")
         return self.s3.read_csv(mimic_bucket, edstays_path, compression='gzip')
