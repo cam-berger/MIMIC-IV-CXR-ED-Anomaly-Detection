@@ -1,6 +1,5 @@
-# MIMIC Multi-Modal Dataset Preprocessor
-
-A scalable cloud-based pipeline for preprocessing and integrating MIMIC-IV, MIMIC-CXR, and MIMIC-ED datasets into a unified multi-modal dataset for medical abnormality detection and classification.
+# MIMIC Multi-Modal Dataset 
+HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused with visual features through cross-modal attention, will improve both the accuracy and interpretability of chest X-ray abnormality detection compared to models using raw clinical notes or images alone, with the improvement being most significant for rare conditions and complex multi-abnormality cases.
 
 ## Overview
 
