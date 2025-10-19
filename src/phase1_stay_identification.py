@@ -1,271 +1,487 @@
+#!/usr/bin/env python3
 """
-Phase 1: Stay ID Identification
-Links chest X-rays to ED stays using temporal matching
+MIMIC Multimodal Data Preprocessing Pipeline
+Links CXR images with anomaly classifications, bounding boxes, and filtered clinical data
 """
 
 import pandas as pd
-from datetime import timedelta
-from typing import Optional
-from loguru import logger
+import numpy as np
+from pathlib import Path
+import json
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple, Optional
+import pydicom
 from tqdm import tqdm
+import re
 
-from .config_manager import get_config
-from .utils import S3Handler, DataValidator
-
-
-class StayIdentifier:
-    """Identify stay_id for chest X-rays"""
+class MIMICPreprocessor:
+    """Preprocessor for linking MIMIC datasets while avoiding data leakage"""
     
-    def __init__(self):
-        """Initialize Stay Identifier"""
-        self.config = get_config()
-        self.s3 = S3Handler(
-            region=self.config.get('aws.region'),
-            profile=self.config.get('aws.profile')
-        )
-        self.extended_window_days = self.config.get(
-            'preprocessing.phase1.extended_window_days', 7
-        )
-        
-        logger.info("Stay Identifier initialized")
-    
-    def identify_stay_for_cxr(
-        self,
-        subject_id: int,
-        study_datetime: pd.Timestamp,
-        ed_stays: pd.DataFrame
-    ) -> Optional[int]:
+    def __init__(self, base_path: str):
         """
-        Identify stay_id for a single CXR using temporal matching
+        Initialize with base path to MIMIC datasets
         
         Args:
-            subject_id: Patient ID
-            study_datetime: When the CXR was taken
-            ed_stays: DataFrame of ED stays
+            base_path: Root directory containing MIMIC-IV, MIMIC-CXR-JPG, REFLACX, MIMIC-ED
+        """
+        self.base_path = Path(base_path)
+        
+        # Define paths to each dataset
+        self.paths = {
+            'mimic_iv': self.base_path / 'mimic-iv',
+            'mimic_cxr': self.base_path / 'mimic-cxr-jpg',
+            'reflacx': self.base_path / 'reflacx',
+            'mimic_ed': self.base_path / 'mimic-ed'
+        }
+        
+        # Initialize dataframes
+        self.cxr_metadata = None
+        self.cxr_labels = None
+        self.reflacx_data = None
+        self.clinical_data = {}
+        
+    def load_cxr_metadata(self):
+        """Load MIMIC-CXR metadata and labels"""
+        print("Loading MIMIC-CXR metadata...")
+        
+        # Load metadata
+        metadata_path = self.paths['mimic_cxr'] / 'mimic-cxr-2.0.0-metadata.csv'
+        self.cxr_metadata = pd.read_csv(metadata_path)
+        
+        # Load CheXpert labels (abnormality classifications)
+        chexpert_path = self.paths['mimic_cxr'] / 'mimic-cxr-2.0.0-chexpert.csv'
+        self.cxr_labels = pd.read_csv(chexpert_path)
+        
+        # Load split information
+        split_path = self.paths['mimic_cxr'] / 'mimic-cxr-2.0.0-split.csv'
+        self.cxr_split = pd.read_csv(split_path)
+        
+        # Merge metadata with labels
+        self.cxr_combined = self.cxr_metadata.merge(
+            self.cxr_labels, 
+            on=['subject_id', 'study_id'],
+            how='left'
+        ).merge(
+            self.cxr_split,
+            on=['subject_id', 'study_id'],
+            how='left'
+        )
+        
+        print(f"  Loaded {len(self.cxr_combined)} CXR studies")
+        
+    def load_reflacx_annotations(self):
+        """Load REFLACX eye-tracking data with bounding boxes"""
+        print("Loading REFLACX annotations...")
+        
+        # REFLACX provides bounding boxes for abnormalities
+        # Structure: subject_id, study_id, dicom_id, boxes, labels
+        
+        reflacx_path = self.paths['reflacx'] / 'main_data'
+        
+        annotations = []
+        
+        # Load anomaly localizations
+        for json_file in (reflacx_path / 'anomaly_location_ellipses').glob('*.json'):
+            with open(json_file, 'r') as f:
+                data = json.load(f)
+                
+            # Parse REFLACX format
+            study_id = json_file.stem
             
-        Returns:
-            stay_id if found, None otherwise
-        """
-        # Get all stays for this patient
-        patient_stays = ed_stays[ed_stays['subject_id'] == subject_id].copy()
+            if 'anomaly_ellipses' in data:
+                for anomaly in data['anomaly_ellipses']:
+                    annotations.append({
+                        'study_id': study_id,
+                        'anomaly_type': anomaly.get('label', 'unknown'),
+                        'ellipse_center_x': anomaly.get('center_x'),
+                        'ellipse_center_y': anomaly.get('center_y'),
+                        'ellipse_major_axis': anomaly.get('major_axis'),
+                        'ellipse_minor_axis': anomaly.get('minor_axis'),
+                        'ellipse_angle': anomaly.get('angle', 0)
+                    })
         
-        if len(patient_stays) == 0:
-            return None
+        self.reflacx_data = pd.DataFrame(annotations)
         
-        # Ensure datetime columns
-        patient_stays['intime'] = pd.to_datetime(patient_stays['intime'])
-        patient_stays['outtime'] = pd.to_datetime(patient_stays['outtime'])
-        
-        # Method 1: CXR taken during ED stay
-        mask = (
-            (patient_stays['intime'] <= study_datetime) &
-            (patient_stays['outtime'] >= study_datetime)
+        # Convert ellipses to bounding boxes for easier use
+        self.reflacx_data['bbox'] = self.reflacx_data.apply(
+            lambda row: self._ellipse_to_bbox(row), axis=1
         )
-        matches = patient_stays[mask]
         
-        if len(matches) > 0:
-            return int(matches.iloc[0]['stay_id'])
+        print(f"  Loaded {len(self.reflacx_data)} anomaly annotations")
         
-        # Method 2: Extended window (within N days after discharge)
-        extended_window = timedelta(days=self.extended_window_days)
-        patient_stays['extended_outtime'] = patient_stays['outtime'] + extended_window
+    def _ellipse_to_bbox(self, row) -> List[float]:
+        """Convert ellipse parameters to bounding box [x_min, y_min, x_max, y_max]"""
+        center_x = row['ellipse_center_x']
+        center_y = row['ellipse_center_y']
+        major = row['ellipse_major_axis']
+        minor = row['ellipse_minor_axis']
         
-        mask = (
-            (patient_stays['intime'] <= study_datetime) &
-            (patient_stays['extended_outtime'] >= study_datetime)
-        )
-        matches = patient_stays[mask]
+        # Simple conversion - can be refined with rotation consideration
+        x_min = center_x - major / 2
+        x_max = center_x + major / 2
+        y_min = center_y - minor / 2
+        y_max = center_y + minor / 2
         
-        if len(matches) > 0:
-            logger.debug(
-                f"Found stay in extended window for subject {subject_id}"
-            )
-            return int(matches.iloc[0]['stay_id'])
-        
-        return None
+        return [x_min, y_min, x_max, y_max]
     
-    def process_chunk(
-        self,
-        cxr_chunk: pd.DataFrame,
-        ed_stays: pd.DataFrame
-    ) -> pd.DataFrame:
+    def load_clinical_data(self, subject_ids: List[int]):
         """
-        Process a chunk of CXR metadata
+        Load relevant clinical data from MIMIC-IV for given subjects
         
         Args:
-            cxr_chunk: DataFrame with CXR metadata
-            ed_stays: DataFrame with ED stays
+            subject_ids: List of subject IDs to load data for
+        """
+        print(f"Loading clinical data for {len(subject_ids)} subjects...")
+        
+        # Load admissions to get timing information
+        admissions = pd.read_csv(
+            self.paths['mimic_iv'] / 'hosp' / 'admissions.csv',
+            parse_dates=['admittime', 'dischtime']
+        )
+        admissions = admissions[admissions['subject_id'].isin(subject_ids)]
+        
+        # Load clinical notes (excluding discharge summaries and radiology reports)
+        notes = pd.read_csv(self.paths['mimic_iv'] / 'note' / 'noteevents.csv')
+        
+        # IMPORTANT: Filter out notes that would leak diagnosis information
+        excluded_categories = [
+            'Discharge summary',
+            'Radiology',  # These directly describe the X-ray findings
+            'Echo',  # Often contains chest-related findings
+            'ECG'  # May reference chest pathology
+        ]
+        
+        notes_filtered = notes[
+            (notes['subject_id'].isin(subject_ids)) &
+            (~notes['category'].isin(excluded_categories))
+        ]
+        
+        # Load lab events
+        lab_events = pd.read_csv(
+            self.paths['mimic_iv'] / 'hosp' / 'labevents.csv',
+            nrows=10000000  # Sample for memory management
+        )
+        lab_events = lab_events[lab_events['subject_id'].isin(subject_ids)]
+        
+        # Load vital signs
+        vitals = pd.read_csv(
+            self.paths['mimic_iv'] / 'icu' / 'chartevents.csv',
+            nrows=10000000  # Sample for memory management
+        )
+        
+        # Filter for vital sign items only
+        vital_itemids = [
+            220045,  # Heart Rate
+            220050,  # Arterial BP Systolic
+            220051,  # Arterial BP Diastolic
+            220210,  # Respiratory Rate
+            223761,  # Temperature (F)
+            220277   # SpO2
+        ]
+        
+        vitals = vitals[
+            (vitals['subject_id'].isin(subject_ids)) &
+            (vitals['itemid'].isin(vital_itemids))
+        ]
+        
+        # Load medications
+        prescriptions = pd.read_csv(
+            self.paths['mimic_iv'] / 'hosp' / 'prescriptions.csv'
+        )
+        prescriptions = prescriptions[prescriptions['subject_id'].isin(subject_ids)]
+        
+        # Store filtered clinical data
+        self.clinical_data = {
+            'admissions': admissions,
+            'notes': notes_filtered,
+            'labs': lab_events,
+            'vitals': vitals,
+            'medications': prescriptions
+        }
+        
+        print(f"  Loaded clinical data:")
+        for key, df in self.clinical_data.items():
+            print(f"    {key}: {len(df)} records")
+    
+    def filter_diagnosis_leakage(self, text: str, diagnosis_keywords: List[str]) -> str:
+        """
+        Remove text that directly mentions the diagnosis
+        
+        Args:
+            text: Clinical note text
+            diagnosis_keywords: List of diagnosis-related keywords to filter
             
         Returns:
-            DataFrame with stay_id added
+            Filtered text
         """
-        results = []
+        if pd.isna(text):
+            return ""
         
-        logger.info(f"Processing {len(cxr_chunk)} CXR records")
+        # Common patterns that leak diagnosis
+        leakage_patterns = [
+            r'chest\s*(x-ray|xray|radiograph)',
+            r'cxr\s*(shows?|reveals?|demonstrates?)',
+            r'imaging\s*(shows?|reveals?|demonstrates?)',
+            r'radiolog\w+\s*finding',
+            r'consolidation',
+            r'infiltrate',
+            r'opacity',
+            r'effusion',
+            r'pneumothorax',
+            r'cardiomegaly'
+        ]
         
-        for idx, row in tqdm(cxr_chunk.iterrows(), total=len(cxr_chunk), desc="Identifying stays"):
-            try:
-                # Validate data
-                if not DataValidator.validate_subject_id(row['subject_id']):
-                    logger.warning(f"Invalid subject_id at row {idx}")
-                    continue
-                
-                # Parse study datetime
-                if pd.isna(row['StudyDate']) or pd.isna(row['StudyTime']):
-                    logger.debug(f"Missing StudyDate/StudyTime at row {idx}")
-                    continue
-                
-                study_datetime = pd.to_datetime(
-                    f"{row['StudyDate']} {row['StudyTime']}"
-                )
-                
-                # Identify stay
-                stay_id = self.identify_stay_for_cxr(
-                    row['subject_id'],
-                    study_datetime,
-                    ed_stays
-                )
-                
-                results.append({
-                    'dicom_id': row['dicom_id'],
-                    'subject_id': row['subject_id'],
-                    'study_id': row['study_id'],
-                    'study_datetime': study_datetime,
-                    'stay_id': stay_id,
-                    'ViewPosition': row.get('ViewPosition', None)
-                })
-                
-            except Exception as e:
-                logger.error(f"Error processing row {idx}: {str(e)}")
+        # Add specific diagnosis keywords
+        for keyword in diagnosis_keywords:
+            leakage_patterns.append(rf'\b{keyword.lower()}\b')
+        
+        # Remove sentences containing leakage patterns
+        sentences = text.split('.')
+        filtered_sentences = []
+        
+        for sentence in sentences:
+            if not any(re.search(pattern, sentence.lower()) for pattern in leakage_patterns):
+                filtered_sentences.append(sentence)
+        
+        return '.'.join(filtered_sentences)
+    
+    def link_cxr_to_clinical(self, time_window_hours: int = 24) -> pd.DataFrame:
+        """
+        Link CXR images to clinical data within specified time window
+        
+        Args:
+            time_window_hours: Hours before CXR to include clinical data
+            
+        Returns:
+            DataFrame with linked data
+        """
+        print(f"Linking CXR to clinical data (±{time_window_hours} hours)...")
+        
+        # Get CXR study times
+        cxr_times = self.cxr_metadata[['subject_id', 'study_id', 'StudyTime']].copy()
+        cxr_times['study_datetime'] = pd.to_datetime(cxr_times['StudyTime'], format='%H%M%S')
+        
+        linked_data = []
+        
+        for _, cxr in tqdm(cxr_times.iterrows(), total=len(cxr_times)):
+            subject_id = cxr['subject_id']
+            study_id = cxr['study_id']
+            study_time = cxr['study_datetime']
+            
+            # Get labels for this study
+            labels = self.cxr_labels[
+                (self.cxr_labels['subject_id'] == subject_id) &
+                (self.cxr_labels['study_id'] == study_id)
+            ]
+            
+            if labels.empty:
                 continue
-        
-        return pd.DataFrame(results)
-    
-    def load_cxr_metadata(self, chunk_id: Optional[int] = None) -> pd.DataFrame:
-        """
-        Load CXR metadata from S3
-        
-        Args:
-            chunk_id: If provided, load specific chunk
             
-        Returns:
-            DataFrame with CXR metadata
-        """
-        if chunk_id is not None:
-            # Load specific chunk
-            temp_bucket = self.config.get('aws.s3.temp_bucket')
-            key = f'processing/chunks/chunk_{chunk_id}.csv'
-            logger.info(f"Loading chunk {chunk_id} from s3://{temp_bucket}/{key}")
-            return self.s3.read_csv(temp_bucket, key)
-        else:
-            # Load full metadata
-            # Check if custom bucket is specified for CXR data
-            custom_bucket = self.config.get('data_paths.mimic_cxr.bucket')
-            mimic_bucket = custom_bucket if custom_bucket else self.config.get('aws.s3.mimic_bucket')
-
-            metadata_path = self.config.get_data_path('mimic_cxr', 'metadata')
-            logger.info(f"Loading CXR metadata from s3://{mimic_bucket}/{metadata_path}")
-
-            # CXR-PRO uses CSV without gzip compression
-            if 'cxr-pro' in metadata_path:
-                return self.s3.read_csv(mimic_bucket, metadata_path)
-            else:
-                return self.s3.read_csv(mimic_bucket, metadata_path, compression='gzip')
+            # Get REFLACX annotations if available
+            reflacx = self.reflacx_data[
+                self.reflacx_data['study_id'] == study_id
+            ] if self.reflacx_data is not None else pd.DataFrame()
+            
+            # Extract diagnoses for filtering
+            positive_findings = []
+            for col in ['Atelectasis', 'Cardiomegaly', 'Consolidation', 'Edema', 
+                       'Enlarged Cardiomediastinum', 'Fracture', 'Lung Lesion',
+                       'Lung Opacity', 'Pleural Effusion', 'Pleural Other',
+                       'Pneumonia', 'Pneumothorax', 'Support Devices']:
+                if col in labels.columns and labels[col].values[0] == 1.0:
+                    positive_findings.append(col)
+            
+            # Get relevant clinical notes (before CXR, excluding diagnosis leakage)
+            relevant_notes = []
+            if 'notes' in self.clinical_data:
+                subject_notes = self.clinical_data['notes'][
+                    self.clinical_data['notes']['subject_id'] == subject_id
+                ]
+                
+                for _, note in subject_notes.iterrows():
+                    # Filter out notes that leak diagnosis
+                    filtered_text = self.filter_diagnosis_leakage(
+                        note['text'],
+                        positive_findings
+                    )
+                    
+                    if filtered_text:
+                        relevant_notes.append({
+                            'note_category': note['category'],
+                            'note_text': filtered_text[:1000]  # Truncate for storage
+                        })
+            
+            # Get relevant lab values
+            relevant_labs = []
+            if 'labs' in self.clinical_data:
+                subject_labs = self.clinical_data['labs'][
+                    self.clinical_data['labs']['subject_id'] == subject_id
+                ]
+                # Aggregate recent lab values
+                recent_labs = subject_labs.groupby('itemid').agg({
+                    'value': 'last',
+                    'valuenum': 'last',
+                    'valueuom': 'first'
+                }).head(20)  # Top 20 most recent labs
+                
+                relevant_labs = recent_labs.to_dict('records')
+            
+            # Get relevant vital signs
+            relevant_vitals = {}
+            if 'vitals' in self.clinical_data:
+                subject_vitals = self.clinical_data['vitals'][
+                    self.clinical_data['vitals']['subject_id'] == subject_id
+                ]
+                
+                # Get most recent vital signs
+                for itemid in [220045, 220050, 220051, 220210, 223761, 220277]:
+                    vital_values = subject_vitals[
+                        subject_vitals['itemid'] == itemid
+                    ]['value'].values
+                    
+                    if len(vital_values) > 0:
+                        relevant_vitals[f'vital_{itemid}'] = vital_values[-1]
+            
+            # Compile linked record
+            linked_record = {
+                'subject_id': subject_id,
+                'study_id': study_id,
+                'image_path': f"files/p{str(subject_id)[:2]}/p{subject_id}/s{study_id}",
+                
+                # Labels (abnormality classifications)
+                'labels': labels.iloc[0].to_dict() if not labels.empty else {},
+                'positive_findings': positive_findings,
+                
+                # Bounding boxes from REFLACX
+                'bounding_boxes': reflacx['bbox'].tolist() if not reflacx.empty else [],
+                'anomaly_types': reflacx['anomaly_type'].tolist() if not reflacx.empty else [],
+                
+                # Filtered clinical data
+                'clinical_notes': relevant_notes[:5],  # Limit to 5 most relevant notes
+                'lab_values': relevant_labs,
+                'vital_signs': relevant_vitals,
+                
+                # Metadata
+                'split': labels.iloc[0].get('split', 'train')
+            }
+            
+            linked_data.append(linked_record)
+        
+        print(f"  Created {len(linked_data)} linked records")
+        return pd.DataFrame(linked_data)
     
-    def load_ed_stays(self) -> pd.DataFrame:
+    def validate_preprocessing(self, linked_df: pd.DataFrame):
         """
-        Load ED stays data from S3
-
-        Returns:
-            DataFrame with ED stays
-        """
-        # Check if custom bucket is specified for ED data
-        custom_bucket = self.config.get('data_paths.mimic_ed.bucket')
-        mimic_bucket = custom_bucket if custom_bucket else self.config.get('aws.s3.mimic_bucket')
-
-        edstays_path = self.config.get_data_path('mimic_ed', 'edstays')
-        logger.info(f"Loading ED stays from s3://{mimic_bucket}/{edstays_path}")
-        return self.s3.read_csv(mimic_bucket, edstays_path, compression='gzip')
-    
-    def run(self, chunk_id: Optional[int] = None):
-        """
-        Execute Phase 1: Stay ID identification
+        Validate that preprocessing removed diagnosis leakage
         
         Args:
-            chunk_id: If provided, process only this chunk
+            linked_df: DataFrame with linked data
         """
-        logger.info("="*60)
-        logger.info("Starting Phase 1: Stay ID Identification")
-        logger.info("="*60)
+        print("Validating preprocessing...")
         
-        # Load data
-        cxr_metadata = self.load_cxr_metadata(chunk_id)
-        ed_stays = self.load_ed_stays()
+        # Check for diagnosis keywords in clinical notes
+        leakage_count = 0
         
-        # Process
-        results = self.process_chunk(cxr_metadata, ed_stays)
+        diagnosis_keywords = [
+            'consolidation', 'infiltrate', 'opacity', 'effusion',
+            'pneumothorax', 'cardiomegaly', 'atelectasis', 'pneumonia'
+        ]
         
-        # Save results
-        output_bucket = self.config.get('aws.s3.output_bucket')
+        for _, row in linked_df.iterrows():
+            notes_text = ' '.join([
+                note.get('note_text', '') 
+                for note in row.get('clinical_notes', [])
+            ])
+            
+            for keyword in diagnosis_keywords:
+                if keyword.lower() in notes_text.lower():
+                    leakage_count += 1
+                    break
         
-        if chunk_id is not None:
-            output_key = f'processing/phase1_results/chunk_{chunk_id}.csv'
-        else:
-            output_key = 'processing/cxr_with_stays.csv'
+        leakage_rate = leakage_count / len(linked_df) * 100
+        print(f"  Potential leakage rate: {leakage_rate:.2f}%")
         
-        logger.info(f"Saving results to s3://{output_bucket}/{output_key}")
-        self.s3.write_csv(results, output_bucket, output_key)
+        if leakage_rate > 5:
+            print("  WARNING: High leakage rate detected. Review filtering logic.")
         
-        # Log statistics
-        self._log_statistics(results)
+        # Validate data completeness
+        print(f"  Records with bounding boxes: {(linked_df['bounding_boxes'].str.len() > 0).sum()}")
+        print(f"  Records with clinical notes: {(linked_df['clinical_notes'].str.len() > 0).sum()}")
+        print(f"  Records with vital signs: {(linked_df['vital_signs'].str.len() > 0).sum()}")
         
-        logger.info("Phase 1 complete!")
-        return results
+        return leakage_rate < 5
     
-    def _log_statistics(self, results: pd.DataFrame):
-        """Log processing statistics"""
-        total = len(results)
-        with_stays = results['stay_id'].notna().sum()
-        without_stays = total - with_stays
-        percentage = (with_stays / total * 100) if total > 0 else 0
+    def save_preprocessed_data(self, linked_df: pd.DataFrame, output_path: str):
+        """
+        Save preprocessed data in multiple formats
         
-        logger.info("="*60)
-        logger.info("Phase 1 Statistics:")
-        logger.info(f"  Total CXRs processed:     {total:,}")
-        logger.info(f"  CXRs with stay_id:        {with_stays:,} ({percentage:.2f}%)")
-        logger.info(f"  CXRs without stay_id:     {without_stays:,}")
-        logger.info("="*60)
+        Args:
+            linked_df: DataFrame with linked data
+            output_path: Path to save preprocessed data
+        """
+        output_path = Path(output_path)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        # Save main dataframe
+        linked_df.to_parquet(output_path / 'linked_data.parquet')
+        
+        # Save train/val/test splits
+        for split in ['train', 'validate', 'test']:
+            split_df = linked_df[linked_df['split'] == split]
+            split_df.to_parquet(output_path / f'{split}_data.parquet')
+            print(f"  Saved {split} split: {len(split_df)} records")
+        
+        # Save metadata
+        metadata = {
+            'total_records': len(linked_df),
+            'subjects': linked_df['subject_id'].nunique(),
+            'studies': linked_df['study_id'].nunique(),
+            'records_with_boxes': (linked_df['bounding_boxes'].str.len() > 0).sum(),
+            'records_with_notes': (linked_df['clinical_notes'].str.len() > 0).sum(),
+            'positive_findings_distribution': linked_df['positive_findings'].value_counts().to_dict()
+        }
+        
+        with open(output_path / 'metadata.json', 'w') as f:
+            json.dump(metadata, f, indent=2, default=str)
+        
+        print(f"Saved preprocessed data to {output_path}")
 
 
 def main():
-    """Main entry point for Phase 1"""
-    import argparse
-    from .utils import setup_logging
+    """Main preprocessing pipeline"""
     
-    parser = argparse.ArgumentParser(
-        description='Phase 1: Identify stay_id for chest X-rays'
-    )
-    parser.add_argument(
-        '--chunk-id',
-        type=int,
-        help='Process specific chunk (for parallel processing)'
-    )
-    parser.add_argument(
-        '--log-level',
-        default='INFO',
-        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
-        help='Logging level'
-    )
+    # Configuration
+    BASE_PATH = "/path/to/your/mimic/datasets"  # Update this
+    OUTPUT_PATH = "./preprocessed_mimic_data"
     
-    args = parser.parse_args()
+    # Initialize preprocessor
+    preprocessor = MIMICPreprocessor(BASE_PATH)
     
-    # Setup logging
-    setup_logging(log_level=args.log_level)
+    # Step 1: Load CXR metadata and labels
+    preprocessor.load_cxr_metadata()
     
-    # Run Phase 1
-    identifier = StayIdentifier()
-    identifier.run(chunk_id=args.chunk_id)
+    # Step 2: Load REFLACX annotations (bounding boxes)
+    preprocessor.load_reflacx_annotations()
+    
+    # Step 3: Get unique subjects from CXR data
+    subject_ids = preprocessor.cxr_metadata['subject_id'].unique()[:100]  # Start with 100 for testing
+    
+    # Step 4: Load clinical data for these subjects
+    preprocessor.load_clinical_data(subject_ids)
+    
+    # Step 5: Link all data together
+    linked_data = preprocessor.link_cxr_to_clinical(time_window_hours=24)
+    
+    # Step 6: Validate preprocessing (check for leakage)
+    is_valid = preprocessor.validate_preprocessing(linked_data)
+    
+    if is_valid:
+        # Step 7: Save preprocessed data
+        preprocessor.save_preprocessed_data(linked_data, OUTPUT_PATH)
+        print("Preprocessing complete!")
+    else:
+        print("Preprocessing validation failed. Please review the pipeline.")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -49,14 +49,17 @@ docker:
 
 # Data paths on S3
 data_paths:
-  # CXR-PRO dataset (in your bucket after upload)
+  # MIMIC-CXR-JPG dataset (images + metadata for deep learning)
+  # This is the PRIMARY dataset for this project
+  # Note: Version 2.1.0 uses 2.0.0 metadata filenames (not updated)
   mimic_cxr:
-    bucket: "bergermimiciv"  # Override to use your bucket instead of physionet-open
-    prefix: "cxr-pro/1.0.0/"
-    h5_file: "cxr.h5"  # HDF5 file with images
-    train_impressions: "mimic_train_impressions.csv"
-    test_impressions: "mimic_test_impressions.csv"
-    metadata: "mimic_train_impressions.csv"  # Use train impressions as default metadata
+    bucket: "bergermimiciv"
+    prefix: "mimic-cxr-jpg/2.1.0/"
+    metadata: "mimic-cxr-2.0.0-metadata.csv.gz"  # Image metadata with StudyDate, StudyTime, ViewPosition
+    split: "mimic-cxr-2.0.0-split.csv.gz"  # Train/val/test splits
+    chexpert: "mimic-cxr-2.0.0-chexpert.csv.gz"  # CheXpert labels (14 diagnoses)
+    negbio: "mimic-cxr-2.0.0-negbio.csv.gz"  # NegBio labels
+    images: "files/"  # JPG images organized by patient (p10-p19)
 
   mimic_ed:
     bucket: "bergermimiciv"
