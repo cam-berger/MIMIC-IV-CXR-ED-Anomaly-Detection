@@ -4,6 +4,21 @@
 
 set -e
 
+# Ensure AWS CLI is in PATH
+# Use the actual user's home directory, not root's
+ACTUAL_USER_HOME="/home/dev"
+export PATH="$ACTUAL_USER_HOME/.local/bin:$PATH"
+
+# Set AWS credentials path to use dev user's credentials even if running as root
+export AWS_CONFIG_FILE="$ACTUAL_USER_HOME/.aws/config"
+export AWS_SHARED_CREDENTIALS_FILE="$ACTUAL_USER_HOME/.aws/credentials"
+
+# Function to run AWS CLI using ml_env conda environment (Python 3.11)
+# Python 3.13 is not yet supported by awscli
+aws_cli() {
+    /home/dev/miniconda3/envs/ml_env/bin/python -m awscli "$@"
+}
+
 # Colors
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -39,7 +54,7 @@ echo -e "${GREEN}✓ Docker image built${NC}"
 # Step 2: Login to ECR
 echo -e "\n${YELLOW}Step 2: Logging in to ECR...${NC}"
 
-aws ecr get-login-password --region "$AWS_REGION" | \
+aws_cli ecr get-login-password --region "$AWS_REGION" | \
     docker login --username AWS --password-stdin \
     "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
@@ -99,12 +114,12 @@ cat > /tmp/job-definition.json << EOF
 EOF
 
 # Create log group if it doesn't exist
-aws logs create-log-group \
+aws_cli logs create-log-group \
     --log-group-name /aws/batch/mimic-preprocessing \
     2>/dev/null || true
 
 # Register job definition
-aws batch register-job-definition \
+aws_cli batch register-job-definition \
     --cli-input-json file:///tmp/job-definition.json
 
 echo -e "${GREEN}✓ Job definition registered${NC}"
