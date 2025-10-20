@@ -5,12 +5,15 @@ __pycache__/
 *.so
 .Python
 venv/
+.venv/
 env/
 ENV/
 build/
 dist/
 *.egg-info/
 .eggs/
+*.pyc
+*.pyo
 
 # IDE
 .vscode/settings.json
@@ -18,10 +21,12 @@ dist/
 .idea/
 *.swp
 *.swo
+*~
 
 # AWS
 .aws/
 credentials
+*.pem
 
 # CRITICAL: Never commit MIMIC data
 data/raw/**
@@ -32,11 +37,18 @@ data/temp/**
 *.jpg
 *.jpeg
 *.dcm
+*.parquet
+
+# JSON files (except config examples)
 *.json
+!.vscode/*.json
+!config/*.json.example
+!package*.json
 
 # Environment
 .env
-.env.local
+.env.*
+!.env.example
 
 # Logs
 *.log
@@ -45,6 +57,26 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+*.ipynb
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+.hypothesis/
+
+# Backup files
+*.bak
+*.backup
+*.save
+*.swp
+*.tmp
