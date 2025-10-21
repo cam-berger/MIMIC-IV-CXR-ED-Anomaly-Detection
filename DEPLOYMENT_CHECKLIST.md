@@ -3,17 +3,26 @@
 ## Pre-Deployment Verification
 
 ### ✅ Code Updates
-- [x] Phase 1 script updated with S3 support
+- [x] **phase1_stay_identification.py** - Updated with S3 support
+- [x] **phase1_preprocess.py** - Updated with S3 support (NEW)
 - [x] Removed `--skip-large-files` flag
 - [x] Added chunked reading for memory efficiency
 - [x] All imports properly declared
+- [x] S3Helper class for unified S3/local operations
 
 ### ✅ Dependencies
 - [x] `requirements.txt` updated with version constraints
-- [x] Added `pydicom>=2.4.0` (was missing)
-- [x] Added `boto3>=1.28.0` for AWS S3
+- [x] Added `pydicom>=2.4.0` (DICOM image support)
+- [x] Added `boto3>=1.28.0` (AWS S3)
+- [x] Added `torch>=2.0.0` (Deep learning - NEW)
+- [x] Added `torchvision>=0.15.0` (Image transforms - NEW)
+- [x] Added `transformers>=4.30.0` (NLP/tokenizers - NEW)
+- [x] Added `sentence-transformers>=2.2.0` (Embeddings - NEW)
+- [x] Added `faiss-cpu>=1.7.4` (Vector search - NEW)
+- [x] Added `opencv-python>=4.8.0` (Image processing - NEW)
 - [x] Version upper bounds added for stability
-- [x] Optional dependencies commented (NLP libraries for Phase 2)
+- [x] Created `scripts/install_dependencies.sh` (NEW)
+- [x] Created `INSTALL_DEPENDENCIES.md` (NEW)
 
 ### ✅ Repository Cleanup
 - [x] Removed `__pycache__` directories
@@ -25,7 +34,9 @@
 ### ✅ Documentation
 - [x] Created `docs/EC2_DEPLOYMENT.md` guide
 - [x] Created `scripts/setup_ec2.sh` automation script
-- [x] Updated README (if needed)
+- [x] Created `scripts/verify_deployment.sh` verification script (NEW)
+- [x] Created `DEPLOYMENT_SUMMARY.md` (NEW)
+- [x] Created `INSTALL_DEPENDENCIES.md` (NEW)
 
 ## AWS Prerequisites
 
