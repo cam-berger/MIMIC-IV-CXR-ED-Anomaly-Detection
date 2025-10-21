@@ -1,3 +1,16 @@
+# Testing
+pytest==7.4.0
+pytest-cov==4.1.0
+pytest-mock==3.11.1
+
+# Code quality
+black==23.7.0
+flake8==6.0.0
+mypy==1.4.1
+isort==5.12.0
+
+# Documentation
+sphinx==7.1.2
 # Core data processing
 pandas>=2.0.0,<3.0.0
 numpy>=1.24.0,<2.0.0
@@ -20,8 +33,20 @@ tqdm>=4.65.0,<5.0.0
 # Logging
 loguru>=0.7.0,<1.0.0
 
-# Image processing
+# Image processing (Phase 1 preprocessing)
 Pillow>=10.0.0,<11.0.0
+opencv-python>=4.8.0,<5.0.0
+torchvision>=0.15.0,<1.0.0
+
+# Deep Learning (Phase 1 preprocessing)
+torch>=2.0.0,<3.0.0
+
+# NLP and Transformers (Phase 1 preprocessing)
+transformers>=4.30.0,<5.0.0
+sentence-transformers>=2.2.0,<3.0.0
+
+# Vector search (Phase 1 RAG)
+faiss-cpu>=1.7.4,<2.0.0
 
 # Data validation
 pydantic>=2.0.0,<3.0.0
@@ -29,12 +54,10 @@ pydantic>=2.0.0,<3.0.0
 # HTTP requests (for image download script)
 requests>=2.31.0,<3.0.0
 
-# Optional: NLP and Medical Text Processing (for leakage_filt_util.py and Phase 2)
-# Uncomment if using Phase 2 clinical extraction
+# Optional: Advanced NLP (for Phase 2 clinical extraction)
+# Uncomment if using Phase 2 advanced features
 # spacy>=3.5.0,<4.0.0
 # scispacy>=0.5.3,<0.6.0
-# transformers>=4.30.0,<5.0.0
-# torch>=2.0.0,<3.0.0
 
 # Medical NLP models (downloaded separately for Phase 2)
 # pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.3/en_core_sci_md-0.5.3.tar.gz
