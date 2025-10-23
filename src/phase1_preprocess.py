@@ -50,6 +50,7 @@ class DataConfig:
     # Paths
     mimic_cxr_path: str = "~/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimic-cxr-jpg-2.1.0"
     mimic_iv_path: str =  "~/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimiciv/3.1"
+    mimic_ed_path: str = "~/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimic-iv-ed/2.2"  # Separate MIMIC-IV-ED dataset
     reflacx_path: str = "~/Documents/Portfolio/MIMIC_Data/physionet.org/files/reflacx"  # Eye-gaze annotations like MDF-Net
     output_path: str = "~/Documents/Portfolio/MIMIC_Data/physionet.org/"
 
@@ -210,17 +211,26 @@ class MIMICDataJoiner:
 
         ed_data = {}
 
+        # MIMIC-IV-ED is a separate dataset from MIMIC-IV
+        # Use mimic_ed_path if available, otherwise fallback to mimic_iv_path/ed
+        if hasattr(self.config, 'mimic_ed_path') and self.config.mimic_ed_path:
+            base_ed_path = self.config.mimic_ed_path
+        else:
+            base_ed_path = self.config.mimic_iv_path
+
         # Load all ED tables
         tables = ['edstays', 'triage', 'vitalsign', 'pyxis', 'medrecon', 'diagnosis']
         for table in tables:
             if self.config.use_s3:
-                file_path = f"{self.config.mimic_iv_path}/ed/{table}.csv.gz"
+                file_path = f"{base_ed_path}/ed/{table}.csv.gz"
             else:
-                file_path = Path(self.config.mimic_iv_path) / "ed" / f"{table}.csv"
+                file_path = Path(base_ed_path) / "ed" / f"{table}.csv"
 
             if self.s3_helper.path_exists(file_path):
                 ed_data[table] = self.s3_helper.read_csv(file_path, compression='gzip' if str(file_path).endswith('.gz') else None)
                 logger.info(f"Loaded {table}: {len(ed_data[table])} records")
+            else:
+                logger.warning(f"Could not find {table} at {file_path}")
 
         return ed_data
     
@@ -842,6 +852,13 @@ def main():
     )
 
     parser.add_argument(
+        '--mimic-ed-path',
+        type=str,
+        default='physionet.org/files/mimic-iv-ed/2.2',
+        help='Path to MIMIC-IV-ED dataset (local or S3 prefix) - separate from MIMIC-IV'
+    )
+
+    parser.add_argument(
         '--reflacx-path',
         type=str,
         default='physionet.org/files/reflacx',
@@ -929,6 +946,7 @@ def main():
     # Update paths
     config.mimic_cxr_path = args.mimic_cxr_path
     config.mimic_iv_path = args.mimic_iv_path
+    config.mimic_ed_path = args.mimic_ed_path
     config.reflacx_path = args.reflacx_path
     config.output_path = args.output_path
     config.knowledge_base_path = args.knowledge_base_path
