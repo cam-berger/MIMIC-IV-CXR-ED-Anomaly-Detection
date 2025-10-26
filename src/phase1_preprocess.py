@@ -6,7 +6,8 @@ Adapts MDF-Net's data processing for use with:
 - RAG knowledge enhancement
 - Cross-attention fusion
 
-AWS S3 Support: Reads from and writes to S3 buckets for cloud deployment
+Google Cloud Storage Support: Reads from and writes to GCS buckets for cloud deployment
+Supports multiple buckets (your data + PhysioNet's public MIMIC-CXR bucket)
 """
 
 import os
@@ -23,8 +24,13 @@ import logging
 import argparse
 from io import BytesIO
 
-# AWS
-import boto3
+# Google Cloud Storage
+try:
+    from google.cloud import storage
+    GCS_AVAILABLE = True
+except ImportError:
+    GCS_AVAILABLE = False
+    storage = None
 
 # Image processing
 from PIL import Image
@@ -47,17 +53,18 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DataConfig:
     """Configuration for data preprocessing"""
-    # Paths
+    # Paths (local or GCS prefixes)
     mimic_cxr_path: str = "~/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimic-cxr-jpg-2.1.0"
     mimic_iv_path: str =  "~/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimiciv/3.1"
     mimic_ed_path: str = "~/Documents/Portfolio/MIMIC_Data/physionet.org/files/mimic-iv-ed/2.2"  # Separate MIMIC-IV-ED dataset
     reflacx_path: str = "~/Documents/Portfolio/MIMIC_Data/physionet.org/files/reflacx"  # Eye-gaze annotations like MDF-Net
     output_path: str = "~/Documents/Portfolio/MIMIC_Data/physionet.org/"
 
-    # AWS S3 Settings
-    use_s3: bool = False
-    s3_bucket: Optional[str] = None
-    output_s3_bucket: Optional[str] = None
+    # Google Cloud Storage Settings
+    use_gcs: bool = False
+    gcs_bucket: Optional[str] = None  # Your bucket (e.g., "bergermimiciv")
+    gcs_cxr_bucket: Optional[str] = None  # MIMIC-CXR bucket (e.g., "mimic-cxr-jpg-2.1.0.physionet.org")
+    output_gcs_bucket: Optional[str] = None  # Output bucket (usually same as gcs_bucket)
 
     # Image settings (BiomedCLIP-CXR requirements)
     image_size: int = 518  # Higher resolution than MDF-Net's 224
@@ -91,86 +98,114 @@ class DataConfig:
     ])
 
 
-class S3Helper:
-    """Helper class for S3 operations"""
+class GCSHelper:
+    """Helper class for Google Cloud Storage operations with multi-bucket support"""
 
     def __init__(self, config: DataConfig):
         self.config = config
-        self.s3_client = None
-        if config.use_s3:
-            self.s3_client = boto3.client('s3')
-            logger.info(f"Initialized S3 client for bucket: {config.s3_bucket}")
+        self.gcs_client = None
+        self.bucket = None
+        self.cxr_bucket = None
+        self.output_bucket = None
+
+        if config.use_gcs:
+            if not GCS_AVAILABLE:
+                raise ImportError("google-cloud-storage is not installed. Run: pip install google-cloud-storage")
+
+            self.gcs_client = storage.Client()
+
+            # Initialize your main bucket (MIMIC-IV, MIMIC-IV-ED, etc.)
+            if config.gcs_bucket:
+                self.bucket = self.gcs_client.bucket(config.gcs_bucket)
+                logger.info(f"Initialized GCS client for bucket: {config.gcs_bucket}")
+
+            # Initialize separate MIMIC-CXR bucket (PhysioNet's public bucket)
+            if config.gcs_cxr_bucket:
+                self.cxr_bucket = self.gcs_client.bucket(config.gcs_cxr_bucket)
+                logger.info(f"Initialized GCS MIMIC-CXR bucket: {config.gcs_cxr_bucket}")
+
+            # Initialize output bucket
+            if config.output_gcs_bucket:
+                self.output_bucket = self.gcs_client.bucket(config.output_gcs_bucket)
+                logger.info(f"Initialized GCS output bucket: {config.output_gcs_bucket}")
+
+    def _get_bucket_for_path(self, path: str):
+        """Determine which bucket to use based on path"""
+        path_str = str(path)
+        # If path contains mimic-cxr-jpg and we have a separate CXR bucket, use it
+        if 'mimic-cxr-jpg' in path_str and self.cxr_bucket:
+            return self.cxr_bucket
+        # Otherwise use main bucket
+        return self.bucket
 
     def read_csv(self, path, **kwargs) -> pd.DataFrame:
-        """Read CSV from S3 or local filesystem"""
-        if self.config.use_s3:
-            s3_key = path if isinstance(path, str) else str(path)
-            logger.info(f"  Reading from S3: s3://{self.config.s3_bucket}/{s3_key}")
-            obj = self.s3_client.get_object(Bucket=self.config.s3_bucket, Key=s3_key)
-            return pd.read_csv(BytesIO(obj['Body'].read()), **kwargs)
+        """Read CSV from GCS or local filesystem"""
+        if self.config.use_gcs:
+            bucket = self._get_bucket_for_path(path)
+            gcs_key = path if isinstance(path, str) else str(path)
+            logger.info(f"  Reading from GCS: gs://{bucket.name}/{gcs_key}")
+            blob = bucket.blob(gcs_key)
+            data = blob.download_as_bytes()
+            return pd.read_csv(BytesIO(data), **kwargs)
         else:
             return pd.read_csv(path, **kwargs)
 
     def read_image(self, path):
-        """Read image from S3 or local filesystem"""
-        if self.config.use_s3:
-            s3_key = path if isinstance(path, str) else str(path)
-            obj = self.s3_client.get_object(Bucket=self.config.s3_bucket, Key=s3_key)
-            return Image.open(BytesIO(obj['Body'].read()))
+        """Read image from GCS or local filesystem"""
+        if self.config.use_gcs:
+            bucket = self._get_bucket_for_path(path)
+            gcs_key = path if isinstance(path, str) else str(path)
+            blob = bucket.blob(gcs_key)
+            data = blob.download_as_bytes()
+            return Image.open(BytesIO(data))
         else:
             return Image.open(path)
 
     def read_image_cv2(self, path):
-        """Read image with OpenCV from S3 or local"""
-        if self.config.use_s3:
-            s3_key = path if isinstance(path, str) else str(path)
-            obj = self.s3_client.get_object(Bucket=self.config.s3_bucket, Key=s3_key)
-            img_array = np.frombuffer(obj['Body'].read(), np.uint8)
+        """Read image with OpenCV from GCS or local"""
+        if self.config.use_gcs:
+            bucket = self._get_bucket_for_path(path)
+            gcs_key = path if isinstance(path, str) else str(path)
+            blob = bucket.blob(gcs_key)
+            data = blob.download_as_bytes()
+            img_array = np.frombuffer(data, np.uint8)
             return cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)
         else:
             return cv2.imread(path, cv2.IMREAD_GRAYSCALE)
 
     def path_exists(self, path) -> bool:
-        """Check if path exists in S3 or locally"""
-        if self.config.use_s3:
-            s3_key = path if isinstance(path, str) else str(path)
-            try:
-                self.s3_client.head_object(Bucket=self.config.s3_bucket, Key=s3_key)
-                return True
-            except:
-                return False
+        """Check if path exists in GCS or locally"""
+        if self.config.use_gcs:
+            bucket = self._get_bucket_for_path(path)
+            gcs_key = path if isinstance(path, str) else str(path)
+            blob = bucket.blob(gcs_key)
+            return blob.exists()
         else:
             return Path(path).exists()
 
     def write_pickle(self, data, path):
-        """Write pickle file to S3 or local"""
-        if self.config.output_s3_bucket:
-            s3_key = path if isinstance(path, str) else str(path)
+        """Write pickle file to GCS or local"""
+        if self.output_bucket:
+            gcs_key = path if isinstance(path, str) else str(path)
             buffer = BytesIO()
             pickle.dump(data, buffer)
             buffer.seek(0)
-            self.s3_client.put_object(
-                Bucket=self.config.output_s3_bucket,
-                Key=s3_key,
-                Body=buffer.getvalue()
-            )
-            logger.info(f"Saved to S3: s3://{self.config.output_s3_bucket}/{s3_key}")
+            blob = self.output_bucket.blob(gcs_key)
+            blob.upload_from_file(buffer, rewind=True)
+            logger.info(f"Saved to GCS: gs://{self.output_bucket.name}/{gcs_key}")
         else:
             with open(path, 'wb') as f:
                 pickle.dump(data, f)
             logger.info(f"Saved locally: {path}")
 
     def write_json(self, data, path):
-        """Write JSON file to S3 or local"""
-        if self.config.output_s3_bucket:
-            s3_key = path if isinstance(path, str) else str(path)
+        """Write JSON file to GCS or local"""
+        if self.output_bucket:
+            gcs_key = path if isinstance(path, str) else str(path)
             json_str = json.dumps(data, indent=2, default=str)
-            self.s3_client.put_object(
-                Bucket=self.config.output_s3_bucket,
-                Key=s3_key,
-                Body=json_str
-            )
-            logger.info(f"Saved to S3: s3://{self.config.output_s3_bucket}/{s3_key}")
+            blob = self.output_bucket.blob(gcs_key)
+            blob.upload_from_string(json_str, content_type='application/json')
+            logger.info(f"Saved to GCS: gs://{self.output_bucket.name}/{gcs_key}")
         else:
             with open(path, 'w') as f:
                 json.dump(data, f, indent=2, default=str)
@@ -185,19 +220,19 @@ class MIMICDataJoiner:
 
     def __init__(self, config: DataConfig):
         self.config = config
-        self.s3_helper = S3Helper(config)
+        self.gcs_helper = GCSHelper(config)
         self.subject_mapping = {}
         self.study_mapping = {}
         
     def load_mimic_cxr_metadata(self) -> pd.DataFrame:
         """Load MIMIC-CXR metadata"""
-        if self.config.use_s3:
+        if self.config.use_gcs:
             metadata_path = f"{self.config.mimic_cxr_path}/mimic-cxr-2.0.0-metadata.csv.gz"
         else:
             metadata_path = Path(self.config.mimic_cxr_path) / "mimic-cxr-2.0.0-metadata.csv"
 
         logger.info("Loading MIMIC-CXR metadata...")
-        metadata = self.s3_helper.read_csv(metadata_path, compression='gzip' if str(metadata_path).endswith('.gz') else None)
+        metadata = self.gcs_helper.read_csv(metadata_path, compression='gzip' if str(metadata_path).endswith('.gz') else None)
 
         # Filter for frontal views (AP/PA) like MDF-Net
         frontal_views = metadata[metadata['ViewPosition'].isin(['AP', 'PA'])]
@@ -221,13 +256,13 @@ class MIMICDataJoiner:
         # Load all ED tables
         tables = ['edstays', 'triage', 'vitalsign', 'pyxis', 'medrecon', 'diagnosis']
         for table in tables:
-            if self.config.use_s3:
+            if self.config.use_gcs:
                 file_path = f"{base_ed_path}/ed/{table}.csv.gz"
             else:
                 file_path = Path(base_ed_path) / "ed" / f"{table}.csv"
 
-            if self.s3_helper.path_exists(file_path):
-                ed_data[table] = self.s3_helper.read_csv(file_path, compression='gzip' if str(file_path).endswith('.gz') else None)
+            if self.gcs_helper.path_exists(file_path):
+                ed_data[table] = self.gcs_helper.read_csv(file_path, compression='gzip' if str(file_path).endswith('.gz') else None)
                 logger.info(f"Loaded {table}: {len(ed_data[table])} records")
             else:
                 logger.warning(f"Could not find {table} at {file_path}")
@@ -387,7 +422,7 @@ class ImagePreprocessor:
 
     def __init__(self, config: DataConfig):
         self.config = config
-        self.s3_helper = S3Helper(config)
+        self.gcs_helper = GCSHelper(config)
         self.transform = self._create_transform()
         
     def _create_transform(self):
@@ -402,7 +437,7 @@ class ImagePreprocessor:
     def preprocess_image(self, image_path: str) -> Optional[torch.Tensor]:
         """Preprocess a single image"""
         try:
-            image = self.s3_helper.read_image(image_path).convert('RGB')
+            image = self.gcs_helper.read_image(image_path).convert('RGB')
 
             # Apply BiomedCLIP-CXR transformations
             image_tensor = self.transform(image)
@@ -419,7 +454,7 @@ class ImagePreprocessor:
         Similar to MDF-Net's approach for finding abnormal regions
         """
         try:
-            image = self.s3_helper.read_image_cv2(image_path)
+            image = self.gcs_helper.read_image_cv2(image_path)
 
             # Apply CLAHE for better contrast
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -689,7 +724,7 @@ class DatasetCreator:
     
     def __init__(self, config: DataConfig):
         self.config = config
-        self.s3_helper = S3Helper(config)
+        self.gcs_helper = GCSHelper(config)
         self.data_joiner = MIMICDataJoiner(config)
         self.image_preprocessor = ImagePreprocessor(config)
         self.text_preprocessor = TextPreprocessor(config)
@@ -792,7 +827,7 @@ class DatasetCreator:
         test_records = records[n_train + n_val:]
 
         # Create output directory for local mode
-        if not self.config.use_s3:
+        if not self.config.use_gcs:
             output_dir = Path(self.config.output_path)
             output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -803,12 +838,12 @@ class DatasetCreator:
         }
 
         for split_name, split_data in splits.items():
-            if self.config.use_s3:
+            if self.config.use_gcs:
                 output_file = f"{self.config.output_path}/{split_name}_data.pkl"
             else:
                 output_file = Path(self.config.output_path) / f"{split_name}_data.pkl"
 
-            self.s3_helper.write_pickle(split_data, output_file)
+            self.gcs_helper.write_pickle(split_data, output_file)
             logger.info(f"Saved {split_name} split with {len(split_data)} records")
 
         # Save metadata
@@ -820,12 +855,12 @@ class DatasetCreator:
             'total_records': n_total
         }
 
-        if self.config.use_s3:
+        if self.config.use_gcs:
             metadata_file = f"{self.config.output_path}/metadata.json"
         else:
             metadata_file = Path(self.config.output_path) / 'metadata.json'
 
-        self.s3_helper.write_json(metadata, metadata_file)
+        self.gcs_helper.write_json(metadata, metadata_file)
         logger.info(f"Dataset creation complete! Total records: {n_total}")
 
 
@@ -879,19 +914,26 @@ def main():
         help='Path to medical knowledge base (local or S3 prefix)'
     )
 
-    # AWS S3 settings
+    # Google Cloud Storage settings
     parser.add_argument(
-        '--s3-bucket',
+        '--gcs-bucket',
         type=str,
         default=None,
-        help='S3 bucket name for reading input data (enables S3 mode)'
+        help='GCS bucket name for reading MIMIC-IV, MIMIC-IV-ED, REFLACX (enables GCS mode). Example: bergermimiciv'
     )
 
     parser.add_argument(
-        '--output-s3-bucket',
+        '--gcs-cxr-bucket',
         type=str,
         default=None,
-        help='S3 bucket name for writing output data (if different from input bucket)'
+        help='GCS bucket name for MIMIC-CXR images. Example: mimic-cxr-jpg-2.1.0.physionet.org (PhysioNet public bucket)'
+    )
+
+    parser.add_argument(
+        '--output-gcs-bucket',
+        type=str,
+        default=None,
+        help='GCS bucket name for writing output data (if different from input bucket)'
     )
 
     # Processing settings
@@ -951,10 +993,11 @@ def main():
     config.output_path = args.output_path
     config.knowledge_base_path = args.knowledge_base_path
 
-    # Update S3 settings
-    config.use_s3 = args.s3_bucket is not None
-    config.s3_bucket = args.s3_bucket
-    config.output_s3_bucket = args.output_s3_bucket if args.output_s3_bucket else args.s3_bucket
+    # Update GCS settings
+    config.use_gcs = args.gcs_bucket is not None
+    config.gcs_bucket = args.gcs_bucket
+    config.gcs_cxr_bucket = args.gcs_cxr_bucket
+    config.output_gcs_bucket = args.output_gcs_bucket if args.output_gcs_bucket else args.gcs_bucket
 
     # Update processing settings
     config.image_size = args.image_size
@@ -969,12 +1012,14 @@ def main():
     logger.info("=" * 60)
     logger.info("MIMIC Enhanced MDF-Net Data Preprocessing Pipeline")
     logger.info("=" * 60)
-    logger.info(f"Mode: {'S3' if config.use_s3 else 'Local'}")
-    if config.use_s3:
-        logger.info(f"Input bucket: {config.s3_bucket}")
-        logger.info(f"Output bucket: {config.output_s3_bucket}")
+    logger.info(f"Mode: {'GCS' if config.use_gcs else 'Local'}")
+    if config.use_gcs:
+        logger.info(f"Main bucket: {config.gcs_bucket}")
+        logger.info(f"CXR bucket: {config.gcs_cxr_bucket}")
+        logger.info(f"Output bucket: {config.output_gcs_bucket}")
     logger.info(f"MIMIC-CXR path: {config.mimic_cxr_path}")
     logger.info(f"MIMIC-IV path: {config.mimic_iv_path}")
+    logger.info(f"MIMIC-ED path: {config.mimic_ed_path}")
     logger.info(f"Output path: {config.output_path}")
     logger.info("=" * 60)
 

@@ -1,63 +1,30 @@
-# Testing
-pytest==7.4.0
-pytest-cov==4.1.0
-pytest-mock==3.11.1
+# MIMIC-IV-CXR-ED Anomaly Detection Preprocessing Pipeline
+# Python Dependencies
 
-# Code quality
-black==23.7.0
-flake8==6.0.0
-mypy==1.4.1
-isort==5.12.0
+# Core Data Processing
+pandas>=2.0.0
+numpy>=1.24.0,<2.0  # NumPy 2.x compatibility issues with some packages
+tqdm>=4.65.0
 
-# Documentation
-sphinx==7.1.2
-# Core data processing
-pandas>=2.0.0,<3.0.0
-numpy>=1.24.0,<2.0.0
-pyarrow>=12.0.0,<15.0.0
+# Image Processing
+pillow>=10.0.0
+opencv-python-headless>=4.8.0
 
-# AWS integration
-boto3>=1.28.0,<2.0.0
-s3fs>=2023.6.0,<2024.0.0
+# Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
 
-# DICOM/Medical imaging
-pydicom>=2.4.0,<3.0.0
+# NLP and Transformers
+transformers>=4.30.0
+sentence-transformers>=2.2.0
+tokenizers>=0.13.0
 
-# Configuration management
-python-dotenv>=1.0.0,<2.0.0
-pyyaml>=6.0.0,<7.0.0
+# Vector Search (RAG)
+faiss-cpu>=1.7.0
 
-# Progress tracking
-tqdm>=4.65.0,<5.0.0
+# Google Cloud Storage
+google-cloud-storage>=2.10.0
 
-# Logging
-loguru>=0.7.0,<1.0.0
-
-# Image processing (Phase 1 preprocessing)
-Pillow>=10.0.0,<11.0.0
-opencv-python>=4.8.0,<5.0.0
-torchvision>=0.15.0,<1.0.0
-
-# Deep Learning (Phase 1 preprocessing)
-torch>=2.0.0,<3.0.0
-
-# NLP and Transformers (Phase 1 preprocessing)
-transformers>=4.30.0,<5.0.0
-sentence-transformers>=2.2.0,<3.0.0
-
-# Vector search (Phase 1 RAG)
-faiss-cpu>=1.7.4,<2.0.0
-
-# Data validation
-pydantic>=2.0.0,<3.0.0
-
-# HTTP requests (for image download script)
-requests>=2.31.0,<3.0.0
-
-# Optional: Advanced NLP (for Phase 2 clinical extraction)
-# Uncomment if using Phase 2 advanced features
-# spacy>=3.5.0,<4.0.0
-# scispacy>=0.5.3,<0.6.0
-
-# Medical NLP models (downloaded separately for Phase 2)
-# pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.3/en_core_sci_md-0.5.3.tar.gz
+# Optional: For notebook development
+# jupyter>=1.0.0
+# ipywidgets>=8.0.0
