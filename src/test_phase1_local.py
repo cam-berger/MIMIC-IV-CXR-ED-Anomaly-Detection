@@ -218,6 +218,7 @@ def test_minimal_pipeline_with_sample_images(config: DataConfig, num_images: int
     try:
         data_joiner = MIMICDataJoiner(config)
         image_preprocessor = ImagePreprocessor(config)
+        gcs_helper = GCSHelper(config)  # Add GCS helper for existence checks
 
         # Load metadata
         cxr_metadata = data_joiner.load_mimic_cxr_metadata()
@@ -227,7 +228,8 @@ def test_minimal_pipeline_with_sample_images(config: DataConfig, num_images: int
         for idx, row in cxr_metadata.head(20).iterrows():  # Check first 20
             image_path = data_joiner._get_image_path(row)
 
-            if Path(image_path).exists():
+            # Use GCS helper for existence check (works for both GCS and local)
+            if gcs_helper.path_exists(image_path):
                 # Try to preprocess
                 image_tensor = image_preprocessor.preprocess_image(image_path)
 
