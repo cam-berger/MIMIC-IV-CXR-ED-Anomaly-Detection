@@ -581,10 +581,12 @@ class ImagePreprocessor:
             result = (pil_image, cv2_image)
             self._image_cache[image_path] = result
 
-            # Clear cache if it gets too large (keep last 1000 images)
-            if len(self._image_cache) > 1000:
-                # Remove oldest entries
-                keys_to_remove = list(self._image_cache.keys())[:-1000]
+            # Clear cache if it gets too large (keep last 50 images)
+            # Each preprocessed image with embeddings uses ~60MB RAM
+            # 50 images = ~3GB, safe for 14GB VM
+            if len(self._image_cache) > 50:
+                # Remove oldest entries (FIFO)
+                keys_to_remove = list(self._image_cache.keys())[:-50]
                 for key in keys_to_remove:
                     del self._image_cache[key]
 
@@ -969,11 +971,37 @@ class DatasetCreator:
             # Clear image cache after each batch to free memory
             self.image_preprocessor._image_cache.clear()
 
+            # CRITICAL: Save and clear processed_records every 2 batches to prevent OOM
+            # With 14GB RAM and ~60MB/record, can safely hold ~200 records (2 batches of 100)
+            # After that, save to disk and clear from memory
+            save_frequency = 2  # Save every 2 batches
+            if (batch_start // batch_size + 1) % save_frequency == 0 and len(processed_records) > 0:
+                batch_num = batch_start // batch_size + 1
+                logger.info(f"Saving intermediate batch checkpoint at batch {batch_num} ({len(processed_records)} total records)...")
+                self.save_intermediate_batch(processed_records, batch_num)
+                # Clear processed records to free memory
+                processed_records = []
+                import gc
+                gc.collect()
+
         logger.info(f"Processing complete! Successfully processed {len(processed_records)}/{total_records} records, failed {failed_count} records")
 
-        # Step 3: Create train/val/test splits
+        # Step 3: Combine all records (from intermediate batches + remaining in memory)
+        logger.info("Combining all processed records...")
+
+        # Save any remaining records not yet saved
         if len(processed_records) > 0:
-            self.create_splits(processed_records)
+            final_batch_num = (total_records // batch_size) + 1000  # Use high number to distinguish final batch
+            logger.info(f"Saving final batch with {len(processed_records)} records...")
+            self.save_intermediate_batch(processed_records, final_batch_num)
+            processed_records = []  # Clear from memory
+
+        # Load all intermediate batches
+        all_records = self.load_all_intermediate_batches()
+
+        # Step 4: Create train/val/test splits
+        if len(all_records) > 0:
+            self.create_splits(all_records)
             logger.info("Dataset creation completed!")
         else:
             logger.error("No records were successfully processed!")
@@ -1034,11 +1062,67 @@ class DatasetCreator:
             'bbox_coordinates': [],  # Bounding boxes for localization
             'severity_scores': []  # Additional clinical scores
         }
-        
+
         # Load from REFLACX or other annotation sources
         # This would typically involve loading radiologist annotations
-        
+
         return labels
+
+    def save_intermediate_batch(self, records: List[Dict], batch_num: int):
+        """
+        Save intermediate batch to disk to free memory
+
+        Args:
+            records: List of processed records
+            batch_num: Batch number for filenaming
+        """
+        if self.config.use_gcs:
+            output_file = f"{self.config.output_path}/intermediate_batch_{batch_num:04d}.pkl"
+        else:
+            output_dir = Path(self.config.output_path)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_file = output_dir / f"intermediate_batch_{batch_num:04d}.pkl"
+
+        self.gcs_helper.write_pickle(records, output_file)
+        logger.info(f"Saved intermediate batch {batch_num} with {len(records)} records to {output_file}")
+
+    def load_all_intermediate_batches(self) -> List[Dict]:
+        """
+        Load all intermediate batch files and combine them
+
+        Returns:
+            Combined list of all records from intermediate batches
+        """
+        import glob
+        all_records = []
+
+        if self.config.use_gcs:
+            # List all intermediate batch files in GCS
+            from google.cloud import storage
+            bucket_name = self.config.gcs_bucket
+            prefix = f"{self.config.output_path}/intermediate_batch_"
+
+            client = storage.Client(project=self.config.gcs_project_id)
+            bucket = client.bucket(bucket_name)
+            blobs = bucket.list_blobs(prefix=prefix)
+
+            for blob in blobs:
+                if blob.name.endswith('.pkl'):
+                    logger.info(f"Loading intermediate batch: {blob.name}")
+                    records = self.gcs_helper.read_pickle(blob.name)
+                    all_records.extend(records)
+        else:
+            # List all intermediate batch files locally
+            output_dir = Path(self.config.output_path)
+            batch_files = sorted(output_dir.glob("intermediate_batch_*.pkl"))
+
+            for batch_file in batch_files:
+                logger.info(f"Loading intermediate batch: {batch_file}")
+                records = self.gcs_helper.read_pickle(str(batch_file))
+                all_records.extend(records)
+
+        logger.info(f"Loaded {len(all_records)} total records from intermediate batches")
+        return all_records
     
     def create_splits(self, records: List[Dict]):
         """Create train/val/test splits and save"""
