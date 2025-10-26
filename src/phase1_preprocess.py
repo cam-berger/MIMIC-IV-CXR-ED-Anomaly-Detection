@@ -361,9 +361,11 @@ class MIMICDataJoiner:
             subject_id = cxr_row['subject_id']
 
             # Combine StudyDate and StudyTime into a single datetime
-            # StudyDate format: YYYYMMDD, StudyTime format: HHMMSS
+            # StudyDate format: YYYYMMDD, StudyTime format: HHMMSS or HHMMSS.fff (with fractional seconds)
             study_date_str = str(cxr_row['StudyDate'])
-            study_time_str = str(cxr_row.get('StudyTime', '000000')).zfill(6)  # Pad with zeros if needed
+            study_time_raw = str(cxr_row.get('StudyTime', '000000'))
+            # Remove fractional seconds if present (e.g., "083045.531" -> "083045")
+            study_time_str = study_time_raw.split('.')[0].zfill(6)
             study_datetime_str = f"{study_date_str} {study_time_str}"
             study_time = pd.to_datetime(study_datetime_str, format='%Y%m%d %H%M%S')
 
