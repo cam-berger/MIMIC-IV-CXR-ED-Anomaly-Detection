@@ -8,9 +8,24 @@ import pandas as pd
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime, timedelta
-import spacy
-from transformers import AutoTokenizer, AutoModel
-import torch
+
+# Optional imports - only needed for advanced NLP features
+try:
+    import spacy
+    SPACY_AVAILABLE = True
+except ImportError:
+    SPACY_AVAILABLE = False
+    spacy = None
+
+try:
+    from transformers import AutoTokenizer, AutoModel
+    import torch
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+    AutoTokenizer = None
+    AutoModel = None
+    torch = None
 
 class DiagnosisLeakageFilter:
     """Advanced filtering to remove diagnosis-related information from clinical data"""
@@ -22,26 +37,34 @@ class DiagnosisLeakageFilter:
         Args:
             use_nlp_model: Whether to use BioBERT for semantic filtering
         """
-        self.use_nlp_model = use_nlp_model
-        
-        if use_nlp_model:
+        self.use_nlp_model = use_nlp_model and TRANSFORMERS_AVAILABLE
+
+        if use_nlp_model and not TRANSFORMERS_AVAILABLE:
+            print("WARNING: transformers not installed. Disabling BioBERT semantic filtering.")
+            print("Install with: pip install transformers torch")
+            self.use_nlp_model = False
+
+        if self.use_nlp_model:
             # Load BioBERT for semantic similarity
             self.tokenizer = AutoTokenizer.from_pretrained("dmis-lab/biobert-v1.1")
             self.model = AutoModel.from_pretrained("dmis-lab/biobert-v1.1")
             self.model.eval()
-        
+
         # Load spaCy for medical entity recognition (optional)
         self.nlp = None
-        try:
-            self.nlp = spacy.load("en_core_sci_md")  # SciSpacy medical model
-            print("Loaded SciSpacy medical model")
-        except:
+        if SPACY_AVAILABLE:
             try:
-                self.nlp = spacy.load("en_core_web_sm")
-                print("Loaded standard spaCy model (SciSpacy not available)")
+                self.nlp = spacy.load("en_core_sci_md")  # SciSpacy medical model
+                print("Loaded SciSpacy medical model")
             except:
-                print("WARNING: No spaCy models found. Entity extraction will be disabled.")
-                print("Install with: python -m spacy download en_core_web_sm")
+                try:
+                    self.nlp = spacy.load("en_core_web_sm")
+                    print("Loaded standard spaCy model (SciSpacy not available)")
+                except:
+                    print("WARNING: No spaCy models found. Entity extraction will be disabled.")
+                    print("Install with: python -m spacy download en_core_web_sm")
+        else:
+            print("INFO: spaCy not installed. Entity extraction disabled (not required for core filtering).")
         
         # Define comprehensive leakage patterns
         self.diagnosis_patterns = self._build_diagnosis_patterns()

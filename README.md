@@ -72,15 +72,14 @@ MIMIC-IV-ED (Your Bucket)          MIMIC-CXR (PhysioNet's Bucket)
 # Install core dependencies
 pip install -r requirements.txt
 
+# Download spaCy language models (required for leakage filtering)
+python -m spacy download en_core_web_sm
+pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/en_core_sci_md-0.5.1.tar.gz
+
 # Authenticate with Google Cloud
 gcloud auth login
 gcloud auth application-default login
 gcloud config set project YOUR_PROJECT_ID
-
-# Optional: Install spaCy for enhanced leakage filtering (not required)
-# pip install spacy>=3.5.0 scispacy>=0.5.0
-# python -m spacy download en_core_web_sm
-# pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/en_core_sci_md-0.5.1.tar.gz
 ```
 
 ### 2. Local Testing (Recommended First)

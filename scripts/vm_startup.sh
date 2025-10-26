@@ -28,27 +28,22 @@ echo "========================================"
 
 # Update system
 echo "[1/8] Updating system packages..."
+export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y python3-pip python3-dev git wget curl
+apt-get install -y python3-pip python3-dev python3-venv git wget curl build-essential
 
-# Install Miniconda
-echo "[2/8] Installing Miniconda..."
-if [ ! -d "/opt/miniconda3" ]; then
-    wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh
-    bash /tmp/miniconda.sh -b -p /opt/miniconda3
-    rm /tmp/miniconda.sh
-fi
+# Create Python virtual environment (simpler than conda, no TOS issues)
+echo "[2/8] Creating Python virtual environment..."
+python3 -m venv /opt/mimic_env
 
-export PATH="/opt/miniconda3/bin:$PATH"
-source /opt/miniconda3/etc/profile.d/conda.sh
+# Activate virtual environment
+source /opt/mimic_env/bin/activate
 
-# Create conda environment
-echo "[3/8] Creating conda environment..."
-conda create -n mimic_env python=3.11 -y
-conda activate mimic_env
+# Upgrade pip
+pip install --upgrade pip setuptools wheel
 
 # Clone repository
-echo "[4/8] Cloning repository..."
+echo "[3/8] Cloning repository..."
 cd /home
 if [ -d "MIMIC-IV-CXR-ED-Anomaly-Detection" ]; then
     cd MIMIC-IV-CXR-ED-Anomaly-Detection
@@ -73,8 +68,13 @@ else
 fi
 
 # Install dependencies
-echo "[5/8] Installing Python dependencies..."
+echo "[4/8] Installing Python dependencies..."
 pip install -r requirements.txt
+
+# Download spaCy models
+echo "[5/8] Downloading spaCy language models..."
+python -m spacy download en_core_web_sm
+pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/en_core_sci_md-0.5.1.tar.gz
 
 # Authenticate with GCP (VM has service account with proper permissions)
 echo "[6/8] Setting up GCP authentication..."
