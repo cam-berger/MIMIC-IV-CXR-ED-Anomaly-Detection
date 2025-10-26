@@ -71,12 +71,17 @@ fi
 echo "[4/8] Installing Python dependencies..."
 pip install -r requirements.txt
 
+# Download spaCy models
+echo "[5/8] Downloading spaCy language models..."
+python -m spacy download en_core_web_sm
+pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/en_core_sci_md-0.5.1.tar.gz
+
 # Authenticate with GCP (VM has service account with proper permissions)
-echo "[5/8] Setting up GCP authentication..."
+echo "[6/8] Setting up GCP authentication..."
 gcloud config set project "$PROJECT_ID"
 
 # Run preprocessing pipeline
-echo "[6/8] Running full preprocessing pipeline..."
+echo "[7/8] Running full preprocessing pipeline..."
 echo "This may take several hours..."
 
 python src/run_full_pipeline.py \
@@ -103,7 +108,7 @@ if [ $PIPELINE_STATUS -eq 0 ]; then
     gsutil cp "$LOG_FILE" "gs://$BUCKET_NAME/logs/preprocessing-$(date +%Y%m%d-%H%M%S).log"
 
     # Shutdown VM to save costs (unless /tmp/no-shutdown exists)
-    echo "[7/8] Pipeline complete. Checking for auto-shutdown..."
+    echo "[8/8] Pipeline complete. Checking for auto-shutdown..."
     if [ ! -f "/tmp/no-shutdown" ]; then
         echo "Auto-shutdown enabled. VM will shutdown in 60 seconds..."
         echo "To prevent shutdown: sudo touch /tmp/no-shutdown"
