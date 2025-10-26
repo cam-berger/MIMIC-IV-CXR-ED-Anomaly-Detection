@@ -11,6 +11,12 @@ HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused w
 - **Robust Error Handling**: Pipeline continues past failed images with detailed diagnostics
 - **Improved Temporal Matching**: Fixed StudyDate+StudyTime parsing, increased matches from 0 to 107,949 records
 - **Detailed Statistics Logging**: Real-time visibility into joining process (successful matches, missing images, temporal mismatches)
+- **OOM Prevention**: Memory-optimized processing allows handling 107,949+ records on 14GB VM without crashes
+
+### Technical Documentation
+- 📋 **[OPUS Fixes Verification](OPUS_FIXES_VERIFICATION.md)**: Complete verification of all 5 critical issues identified and fixed
+- 🔧 **[OOM Fix Summary](SESSION_OOM_FIX_SUMMARY.md)**: Detailed analysis and solution for memory management issues
+- 📊 All fixes verified and deployed to production (VM: mimic-preprocessing-20251026-092532)
 
 ## Overview
 
