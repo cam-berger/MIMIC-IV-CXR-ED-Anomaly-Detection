@@ -30,12 +30,18 @@ class DiagnosisLeakageFilter:
             self.model = AutoModel.from_pretrained("dmis-lab/biobert-v1.1")
             self.model.eval()
         
-        # Load spaCy for medical entity recognition
+        # Load spaCy for medical entity recognition (optional)
+        self.nlp = None
         try:
             self.nlp = spacy.load("en_core_sci_md")  # SciSpacy medical model
+            print("Loaded SciSpacy medical model")
         except:
-            print("SciSpacy not found, using regular spaCy")
-            self.nlp = spacy.load("en_core_web_sm")
+            try:
+                self.nlp = spacy.load("en_core_web_sm")
+                print("Loaded standard spaCy model (SciSpacy not available)")
+            except:
+                print("WARNING: No spaCy models found. Entity extraction will be disabled.")
+                print("Install with: python -m spacy download en_core_web_sm")
         
         # Define comprehensive leakage patterns
         self.diagnosis_patterns = self._build_diagnosis_patterns()

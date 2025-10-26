@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Local testing script for Phase 1 preprocessing with minimal resource requirements
-Designed for laptop testing before full AWS deployment
+Designed for laptop testing before full Google Cloud deployment
 """
 
 import os
@@ -16,7 +16,7 @@ from phase1_preprocess import (
     MIMICDataJoiner,
     ImagePreprocessor,
     TextPreprocessor,
-    S3Helper
+    GCSHelper
 )
 import pandas as pd
 import logging
@@ -45,9 +45,10 @@ def create_minimal_test_config(local_mimic_path: str, num_samples: int = 10) -> 
     # Output to local directory
     config.output_path = str(Path("./test_output").absolute())
 
-    # Disable S3
-    config.use_s3 = False
-    config.s3_bucket = None
+    # Disable GCS (run locally)
+    config.use_gcs = False
+    config.gcs_bucket = None
+    config.gcs_cxr_bucket = None
 
     # Reduce resource requirements
     config.image_size = 224  # Smaller than default 518
