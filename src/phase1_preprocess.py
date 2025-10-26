@@ -23,6 +23,9 @@ from tqdm import tqdm
 import logging
 import argparse
 from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from functools import lru_cache
+import multiprocessing as mp
 
 # Google Cloud Storage
 try:
@@ -460,13 +463,15 @@ class ImagePreprocessor:
     """
     Preprocess images for BiomedCLIP-CXR
     Enhanced from MDF-Net's basic preprocessing
+    Optimized with caching to avoid duplicate downloads
     """
 
     def __init__(self, config: DataConfig):
         self.config = config
         self.gcs_helper = GCSHelper(config)
         self.transform = self._create_transform()
-        
+        self._image_cache = {}  # Cache for downloaded images
+
     def _create_transform(self):
         """Create transformation pipeline for BiomedCLIP-CXR"""
         return transforms.Compose([
@@ -475,32 +480,76 @@ class ImagePreprocessor:
             transforms.Normalize(mean=self.config.normalize_mean,
                                std=self.config.normalize_std)
         ])
-    
-    def preprocess_image(self, image_path: str) -> Optional[torch.Tensor]:
-        """Preprocess a single image"""
+
+    def _download_and_cache_image(self, image_path: str) -> Optional[Tuple[Image.Image, np.ndarray]]:
+        """
+        Download image once and return both PIL and cv2 versions
+        Caches result to avoid duplicate downloads
+        """
+        # Check cache first
+        if image_path in self._image_cache:
+            return self._image_cache[image_path]
+
         try:
-            image = self.gcs_helper.read_image(image_path).convert('RGB')
+            # Download once from GCS
+            if self.config.use_gcs:
+                bucket = self.gcs_helper._get_bucket_for_path(image_path)
+                blob = bucket.blob(image_path)
+                data = blob.download_as_bytes()
 
-            # Apply BiomedCLIP-CXR transformations
-            image_tensor = self.transform(image)
+                # Create PIL image
+                pil_image = Image.open(BytesIO(data)).convert('RGB')
 
-            return image_tensor
+                # Create cv2 image (grayscale)
+                img_array = np.frombuffer(data, np.uint8)
+                cv2_image = cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)
+            else:
+                # Local filesystem
+                pil_image = Image.open(image_path).convert('RGB')
+                cv2_image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+
+            # Cache the result
+            result = (pil_image, cv2_image)
+            self._image_cache[image_path] = result
+
+            # Clear cache if it gets too large (keep last 1000 images)
+            if len(self._image_cache) > 1000:
+                # Remove oldest entries
+                keys_to_remove = list(self._image_cache.keys())[:-1000]
+                for key in keys_to_remove:
+                    del self._image_cache[key]
+
+            return result
 
         except Exception as e:
-            logger.error(f"Error processing image {image_path}: {e}")
+            logger.error(f"Error downloading image {image_path}: {e}")
             return None
-    
-    def extract_attention_regions(self, image_path: str) -> Optional[np.ndarray]:
-        """
-        Extract attention regions using edge detection
-        Similar to MDF-Net's approach for finding abnormal regions
-        """
-        try:
-            image = self.gcs_helper.read_image_cv2(image_path)
 
+    def preprocess_image_and_attention(self, image_path: str) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
+        """
+        Preprocess image and extract attention regions in one pass
+        Downloads the image only once
+        Returns: (image_tensor, attention_mask)
+        """
+        # Download image once
+        result = self._download_and_cache_image(image_path)
+        if result is None:
+            return None, None
+
+        pil_image, cv2_image = result
+
+        # Process PIL image for BiomedCLIP-CXR
+        try:
+            image_tensor = self.transform(pil_image)
+        except Exception as e:
+            logger.error(f"Error transforming image {image_path}: {e}")
+            image_tensor = None
+
+        # Process cv2 image for attention regions
+        try:
             # Apply CLAHE for better contrast
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            enhanced = clahe.apply(image)
+            enhanced = clahe.apply(cv2_image)
 
             # Edge detection to find potential abnormal regions
             edges = cv2.Canny(enhanced, 50, 150)
@@ -509,21 +558,29 @@ class ImagePreprocessor:
             contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             # Create attention mask
-            attention_mask = np.zeros_like(image, dtype=np.float32)
+            attention_mask = np.zeros_like(cv2_image, dtype=np.float32)
             for contour in contours:
                 area = cv2.contourArea(contour)
                 if area > 100:  # Filter small regions
                     cv2.drawContours(attention_mask, [contour], -1, 1.0, -1)
-
-            return attention_mask
-
         except Exception as e:
             logger.warning(f"Error extracting attention regions from {image_path}: {e}. Returning zero mask.")
-            # Return a zero mask instead of None to allow processing to continue
             try:
-                return np.zeros((self.config.image_size, self.config.image_size), dtype=np.float32)
+                attention_mask = np.zeros((self.config.image_size, self.config.image_size), dtype=np.float32)
             except:
-                return None
+                attention_mask = None
+
+        return image_tensor, attention_mask
+
+    def preprocess_image(self, image_path: str) -> Optional[torch.Tensor]:
+        """Preprocess a single image (backward compatibility)"""
+        image_tensor, _ = self.preprocess_image_and_attention(image_path)
+        return image_tensor
+
+    def extract_attention_regions(self, image_path: str) -> Optional[np.ndarray]:
+        """Extract attention regions (backward compatibility)"""
+        _, attention_mask = self.preprocess_image_and_attention(image_path)
+        return attention_mask
 
 
 class TextPreprocessor:
@@ -776,37 +833,74 @@ class DatasetCreator:
         self.text_preprocessor = TextPreprocessor(config)
         self.rag_enhancer = RAGKnowledgeEnhancer(config)
         
-    def create_dataset(self):
-        """Main dataset creation pipeline"""
+    def create_dataset(self, batch_size: int = 100, num_workers: int = 4):
+        """
+        Main dataset creation pipeline with parallel processing
+
+        Args:
+            batch_size: Number of records to process in each batch
+            num_workers: Number of parallel workers for image downloading
+        """
         logger.info("Starting dataset creation pipeline...")
+        logger.info(f"Using batch_size={batch_size}, num_workers={num_workers}")
 
         # Step 1: Join multimodal data (MDF-Net approach)
         joined_data = self.data_joiner.join_multimodal_data()
+        total_records = len(joined_data)
 
-        # Step 2: Process each record
+        # Step 2: Process records in batches with parallel downloading
         processed_records = []
         failed_count = 0
 
-        for idx, row in tqdm(joined_data.iterrows(), total=len(joined_data)):
-            try:
-                record = self.process_single_record(row)
-                if record is not None:
-                    processed_records.append(record)
-                else:
-                    failed_count += 1
-                    if failed_count % 100 == 0:
-                        logger.warning(f"Failed to process {failed_count} records so far")
-            except KeyboardInterrupt:
-                logger.warning(f"Interrupted by user at record {idx}. Saving {len(processed_records)} successfully processed records...")
-                break
-            except Exception as e:
-                failed_count += 1
-                logger.error(f"Error processing record {idx} (subject_id={row.get('subject_id', 'unknown')}): {e}")
-                if failed_count % 100 == 0:
-                    logger.warning(f"Failed to process {failed_count} records so far")
-                continue
+        # Process in batches
+        for batch_start in range(0, total_records, batch_size):
+            batch_end = min(batch_start + batch_size, total_records)
+            batch_data = joined_data.iloc[batch_start:batch_end]
 
-        logger.info(f"Processing complete! Successfully processed {len(processed_records)} records, failed {failed_count} records")
+            logger.info(f"Processing batch {batch_start//batch_size + 1}/{(total_records + batch_size - 1)//batch_size}: records {batch_start}-{batch_end}")
+
+            # Batch download images in parallel using ThreadPoolExecutor
+            image_paths = batch_data['image_path'].tolist()
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                # Pre-download all images in this batch
+                futures = {executor.submit(self.image_preprocessor._download_and_cache_image, path): path
+                          for path in image_paths}
+
+                for future in tqdm(as_completed(futures), total=len(futures),
+                                 desc=f"Downloading batch {batch_start//batch_size + 1}", leave=False):
+                    try:
+                        future.result()  # Just cache the result
+                    except Exception as e:
+                        path = futures[future]
+                        logger.error(f"Error downloading {path}: {e}")
+
+            # Now process each record (images are cached)
+            for idx, row in tqdm(batch_data.iterrows(), total=len(batch_data),
+                                desc=f"Processing batch {batch_start//batch_size + 1}", leave=False):
+                try:
+                    record = self.process_single_record(row)
+                    if record is not None:
+                        processed_records.append(record)
+                    else:
+                        failed_count += 1
+                except KeyboardInterrupt:
+                    logger.warning(f"Interrupted by user at record {idx}. Saving {len(processed_records)} successfully processed records...")
+                    # Step 3: Create train/val/test splits with partial data
+                    if len(processed_records) > 0:
+                        self.create_splits(processed_records)
+                        logger.info(f"Saved {len(processed_records)} records before interruption")
+                    return
+                except Exception as e:
+                    failed_count += 1
+                    logger.error(f"Error processing record {idx} (subject_id={row.get('subject_id', 'unknown')}): {e}")
+
+            # Log progress
+            logger.info(f"Batch complete. Total processed: {len(processed_records)}, failed: {failed_count}")
+
+            # Clear image cache after each batch to free memory
+            self.image_preprocessor._image_cache.clear()
+
+        logger.info(f"Processing complete! Successfully processed {len(processed_records)}/{total_records} records, failed {failed_count} records")
 
         # Step 3: Create train/val/test splits
         if len(processed_records) > 0:
@@ -817,14 +911,11 @@ class DatasetCreator:
         
     def process_single_record(self, row: pd.Series) -> Optional[Dict]:
         """Process a single multimodal record"""
-        
-        # Process image
-        image_tensor = self.image_preprocessor.preprocess_image(row['image_path'])
+
+        # Process image and extract attention regions in one pass (optimized)
+        image_tensor, attention_mask = self.image_preprocessor.preprocess_image_and_attention(row['image_path'])
         if image_tensor is None:
             return None
-        
-        # Extract attention regions (MDF-Net style)
-        attention_mask = self.image_preprocessor.extract_attention_regions(row['image_path'])
         
         # Process pseudo-note
         pseudo_note = row['pseudo_note']
@@ -1026,6 +1117,21 @@ def main():
         help='Number of knowledge documents to retrieve (default: 5)'
     )
 
+    # Performance optimization
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=100,
+        help='Number of records to process in each batch for parallel downloading (default: 100)'
+    )
+
+    parser.add_argument(
+        '--num-workers',
+        type=int,
+        default=4,
+        help='Number of parallel workers for image downloading (default: 4)'
+    )
+
     # Data splits
     parser.add_argument(
         '--train-split',
@@ -1102,7 +1208,10 @@ def main():
 
     # Create dataset
     dataset_creator = DatasetCreator(config)
-    dataset_creator.create_dataset()
+    dataset_creator.create_dataset(
+        batch_size=args.batch_size,
+        num_workers=args.num_workers
+    )
 
     logger.info("=" * 60)
     logger.info("Processing complete!")
