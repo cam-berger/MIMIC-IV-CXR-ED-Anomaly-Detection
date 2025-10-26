@@ -49,13 +49,16 @@ if [ -d "MIMIC-IV-CXR-ED-Anomaly-Detection" ]; then
     cd MIMIC-IV-CXR-ED-Anomaly-Detection
     git pull
 else
-    # If no git repo provided, create a minimal setup
-    mkdir -p MIMIC-IV-CXR-ED-Anomaly-Detection
-    cd MIMIC-IV-CXR-ED-Anomaly-Detection
-
-    # Download code from GCS bucket if available
-    if gsutil -q stat "gs://$BUCKET_NAME/code/src.tar.gz"; then
+    # Try git repo first if provided
+    if [ -n "$GIT_REPO" ] && [ "$GIT_REPO" != "" ]; then
+        echo "Cloning from Git: $GIT_REPO"
+        git clone "$GIT_REPO"
+        cd MIMIC-IV-CXR-ED-Anomaly-Detection
+    # Otherwise try GCS bucket
+    elif gsutil -q stat "gs://$BUCKET_NAME/code/src.tar.gz"; then
         echo "Downloading code from GCS..."
+        mkdir -p MIMIC-IV-CXR-ED-Anomaly-Detection
+        cd MIMIC-IV-CXR-ED-Anomaly-Detection
         gsutil cp "gs://$BUCKET_NAME/code/src.tar.gz" .
         tar -xzf src.tar.gz
     else
