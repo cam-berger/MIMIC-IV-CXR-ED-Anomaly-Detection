@@ -268,15 +268,29 @@ class MIMICDataJoiner:
         tables = ['edstays', 'triage', 'vitalsign', 'pyxis', 'medrecon', 'diagnosis']
         for table in tables:
             if self.config.use_gcs:
-                file_path = f"{base_ed_path}/ed/{table}.csv.gz"
+                # Try .csv.gz first, then .csv
+                file_path_gz = f"{base_ed_path}/ed/{table}.csv.gz"
+                file_path_csv = f"{base_ed_path}/ed/{table}.csv"
+
+                if self.gcs_helper.path_exists(file_path_gz):
+                    file_path = file_path_gz
+                    compression = 'gzip'
+                elif self.gcs_helper.path_exists(file_path_csv):
+                    file_path = file_path_csv
+                    compression = None
+                else:
+                    logger.warning(f"Could not find {table} at {file_path_gz} or {file_path_csv}")
+                    continue
             else:
                 file_path = Path(base_ed_path) / "ed" / f"{table}.csv"
+                compression = None
 
-            if self.gcs_helper.path_exists(file_path):
-                ed_data[table] = self.gcs_helper.read_csv(file_path, compression='gzip' if str(file_path).endswith('.gz') else None)
-                logger.info(f"Loaded {table}: {len(ed_data[table])} records")
-            else:
-                logger.warning(f"Could not find {table} at {file_path}")
+                if not self.gcs_helper.path_exists(file_path):
+                    logger.warning(f"Could not find {table} at {file_path}")
+                    continue
+
+            ed_data[table] = self.gcs_helper.read_csv(file_path, compression=compression)
+            logger.info(f"Loaded {table}: {len(ed_data[table])} records")
 
         return ed_data
     
