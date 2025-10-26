@@ -1,6 +1,6 @@
-# MIMIC Multi-Modal Dataset 
+# MIMIC Multi-Modal Dataset
+
 HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused with visual features through cross-modal attention, will improve both the accuracy and interpretability of chest X-ray abnormality detection compared to models using raw clinical notes or images alone, with the improvement being most significant for rare conditions and complex multi-abnormality cases.
->>>>>>> main
 
 ## Overview
 
@@ -15,9 +15,12 @@ The pipeline links MIMIC-CXR chest X-rays with MIMIC-IV-ED emergency department 
 ## Key Features
 
 - ✅ **Multi-Bucket GCS Support**: Seamlessly works with your data bucket + PhysioNet's public MIMIC-CXR bucket
+- ✅ **Flexible File Format Support**: Handles both compressed (.csv.gz) and uncompressed (.csv) data files
 - ✅ **Pseudo-Note Generation**: Converts structured clinical data into narrative text for LLM processing
+- ✅ **Diagnosis Leakage Filtering**: Removes diagnosis information to prevent data leakage
 - ✅ **Temporal Alignment**: Links chest X-rays to ED visits within 24-hour windows
 - ✅ **Local Testing**: Test preprocessing locally before cloud deployment
+- ✅ **Automated GCP Deployment**: One-command deployment with auto-shutdown
 - ✅ **Scalable**: Handles 377K+ chest X-rays and 425K+ ED visits
 - ✅ **Cloud-Native**: Optimized for Google Cloud Platform (Compute Engine, Cloud Storage)
 
@@ -48,10 +51,12 @@ MIMIC-IV-ED (Your Bucket)          MIMIC-CXR (PhysioNet's Bucket)
    - `mimiciv/3.1/hosp/` - Admission records
    - `mimiciv/3.1/icu/` - ICU data
    - Size: ~5 GB
+   - **Formats supported**: Both `.csv.gz` (compressed) and `.csv` (uncompressed)
 
 2. **MIMIC-IV-ED 2.2** - Emergency Department data (separate dataset!)
    - `mimic-iv-ed/2.2/ed/` - ED stays, triage, vital signs
    - Size: ~2 GB
+   - **Formats supported**: Both `.csv.gz` (compressed) and `.csv` (uncompressed)
 
 3. **REFLACX** (Optional) - Eye-gaze annotations
    - `reflacx/` - Radiologist attention maps
@@ -120,11 +125,12 @@ gcloud auth list
 
 ```bash
 # Upload MIMIC-IV and MIMIC-IV-ED to your bucket
+# Note: The pipeline supports both .csv.gz (compressed) and .csv (uncompressed) files
 gsutil -m cp -r ~/MIMIC_Data/physionet.org/files/mimiciv \
-  gs://bergermimiciv/physionet.org/files/
+  gs://bergermimiciv/
 
 gsutil -m cp -r ~/MIMIC_Data/physionet.org/files/mimic-iv-ed \
-  gs://bergermimiciv/physionet.org/files/
+  gs://bergermimiciv/
 
 # OPTION A: Automated Deployment (Recommended)
 # Automatically creates VM, installs dependencies, runs full pipeline, auto-shuts down
@@ -134,7 +140,7 @@ bash scripts/deploy_gcp.sh YOUR_PROJECT_ID bergermimiciv
 # Create VM and run pipeline manually
 gcloud compute instances create mimic-preprocessing \
   --zone=us-central1-a \
-  --machine-type=n1-highmem-8 \
+  --machine-type=n1-standard-4 \
   --boot-disk-size=200GB \
   --scopes=cloud-platform
 
@@ -144,12 +150,12 @@ python src/run_full_pipeline.py \
   --gcs-bucket bergermimiciv \
   --gcs-cxr-bucket mimic-cxr-jpg-2.1.0.physionet.org \
   --gcs-project-id YOUR_PROJECT_ID \
-  --mimic-iv-path physionet.org/files/mimiciv/3.1 \
-  --mimic-ed-path physionet.org/files/mimic-iv-ed/2.2 \
+  --mimic-iv-path mimiciv/3.1 \
+  --mimic-ed-path mimic-iv-ed/2.2 \
   --output-path processed/phase1_final \
   --aggressive-filtering
 
-# See docs/GCP_DEPLOYMENT.md for complete deployment guide
+# See docs/GCP_DEPLOYMENT.md and DEPLOYMENT_QUICKSTART.md for complete deployment guides
 ```
 
 ## Project Structure
@@ -159,14 +165,20 @@ python src/run_full_pipeline.py \
 ├── src/
 │   ├── phase1_preprocess.py        # Main preprocessing pipeline
 │   ├── phase1_stay_identification.py  # ED stay linking
+│   ├── run_full_pipeline.py        # Orchestrates preprocessing + leakage filtering
+│   ├── apply_leakage_filter.py     # Diagnosis leakage filtering
+│   ├── leakage_filt_util.py        # Leakage filtering utilities
 │   └── test_phase1_local.py        # Local testing script
-├── notebooks/
-│   └── phase1_preprocess.ipynb     # Interactive notebook
+├── scripts/
+│   ├── deploy_gcp.sh               # Automated GCP VM deployment
+│   └── vm_startup.sh               # VM initialization script
 ├── docs/
+│   ├── GCP_DEPLOYMENT.md           # Complete GCP deployment guide
 │   ├── GCS_SETUP.md                # Google Cloud setup guide
 │   ├── ARCHITECTURE.md             # System architecture
 │   └── IMAGE_DOWNLOAD_GUIDE.md     # MIMIC-CXR download guide
 ├── LOCAL_TESTING.md                # Local testing guide
+├── DEPLOYMENT_QUICKSTART.md        # Quick deployment reference
 ├── PSEUDO_NOTES_EXPLAINED.md       # Pseudo-note generation explained
 └── README.md                       # This file
 ```
@@ -389,9 +401,10 @@ python src/phase1_preprocess.py \
   --gcs-project-id YOUR_PROJECT_ID
 ```
 
-### "No ED stays available"
+### "No ED stays available" or "Could not find edstays"
 - Check that MIMIC-IV-ED is in `mimic-iv-ed/2.2/ed/`, not `mimiciv/3.1/ed/`
 - Verify `mimic_ed_path` is set correctly
+- The pipeline supports both `.csv.gz` and `.csv` file formats - no need to compress/decompress
 
 ### "AccessDeniedException" on MIMIC-CXR bucket
 - Ensure you have PhysioNet MIMIC-CXR access
@@ -406,6 +419,8 @@ See [LOCAL_TESTING.md](LOCAL_TESTING.md) for more troubleshooting tips.
 
 ## Documentation
 
+- **[DEPLOYMENT_QUICKSTART.md](DEPLOYMENT_QUICKSTART.md)** - Quick deployment reference
+- **[docs/GCP_DEPLOYMENT.md](docs/GCP_DEPLOYMENT.md)** - Complete GCP deployment guide
 - **[LOCAL_TESTING.md](LOCAL_TESTING.md)** - Test locally before cloud deployment
 - **[docs/GCS_SETUP.md](docs/GCS_SETUP.md)** - Complete Google Cloud setup guide
 - **[PSEUDO_NOTES_EXPLAINED.md](PSEUDO_NOTES_EXPLAINED.md)** - How pseudo-notes work
@@ -440,7 +455,7 @@ tqdm>=4.65.0
 - Python 3.9-3.11
 
 ### System Requirements (Cloud)
-- Compute Engine: n1-standard-8 (8 vCPUs, 30 GB RAM)
+- Compute Engine: n1-standard-4 (4 vCPUs, 15 GB RAM) - minimum recommended
 - GPU: NVIDIA Tesla T4 (optional, for faster preprocessing)
 - Storage: 200 GB boot disk
 
@@ -483,5 +498,5 @@ For questions or issues:
 
 ---
 
-**Last Updated**: 2025-10-22
-**Status**: Phase 1 Complete ✅ | Multi-Bucket GCS Support ✅ | Local Testing ✅
+**Last Updated**: 2025-10-25
+**Status**: Phase 1 Complete ✅ | Multi-Bucket GCS Support ✅ | Local Testing ✅ | GCP Deployment Automation ✅ | Flexible File Format Support ✅

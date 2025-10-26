@@ -1,6 +1,6 @@
 # Local Testing Guide for Phase 1 Preprocessing
 
-This guide helps you test Phase 1 preprocessing functionality on your resource-limited laptop before deploying to AWS.
+This guide helps you test Phase 1 preprocessing functionality on your resource-limited laptop before deploying to Google Cloud Platform.
 
 ## Prerequisites
 
@@ -245,7 +245,7 @@ python src/phase1_stay_identification.py \
      --max-text-length 512
    ```
 
-5. **Deploy to AWS** - Once local testing is successful, follow the [SAGEMAKER_QUICKSTART.md](SAGEMAKER_QUICKSTART.md) guide
+5. **Deploy to GCP** - Once local testing is successful, follow the [DEPLOYMENT_QUICKSTART.md](DEPLOYMENT_QUICKSTART.md) or [docs/GCP_DEPLOYMENT.md](docs/GCP_DEPLOYMENT.md) guide
 
 ## Monitoring Resource Usage
 
