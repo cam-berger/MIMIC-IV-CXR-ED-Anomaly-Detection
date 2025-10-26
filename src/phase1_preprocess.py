@@ -359,8 +359,16 @@ class MIMICDataJoiner:
         
         for idx, cxr_row in tqdm(cxr_metadata.iterrows(), total=len(cxr_metadata)):
             subject_id = cxr_row['subject_id']
-            study_time = pd.to_datetime(cxr_row['StudyDate'])
-            
+
+            # Combine StudyDate and StudyTime into a single datetime
+            # StudyDate format: YYYYMMDD, StudyTime format: HHMMSS or HHMMSS.fff (with fractional seconds)
+            study_date_str = str(cxr_row['StudyDate'])
+            study_time_raw = str(cxr_row.get('StudyTime', '000000'))
+            # Remove fractional seconds if present (e.g., "083045.531" -> "083045")
+            study_time_str = study_time_raw.split('.')[0].zfill(6)
+            study_datetime_str = f"{study_date_str} {study_time_str}"
+            study_time = pd.to_datetime(study_datetime_str, format='%Y%m%d %H%M%S')
+
             # Find matching ED stay within 24 hours
             if 'edstays' in ed_data:
                 ed_stays = ed_data['edstays'][ed_data['edstays']['subject_id'] == subject_id]
@@ -510,8 +518,12 @@ class ImagePreprocessor:
             return attention_mask
 
         except Exception as e:
-            logger.error(f"Error extracting attention regions from {image_path}: {e}")
-            return None
+            logger.warning(f"Error extracting attention regions from {image_path}: {e}. Returning zero mask.")
+            # Return a zero mask instead of None to allow processing to continue
+            try:
+                return np.zeros((self.config.image_size, self.config.image_size), dtype=np.float32)
+            except:
+                return None
 
 
 class TextPreprocessor:
@@ -767,26 +779,41 @@ class DatasetCreator:
     def create_dataset(self):
         """Main dataset creation pipeline"""
         logger.info("Starting dataset creation pipeline...")
-        
+
         # Step 1: Join multimodal data (MDF-Net approach)
         joined_data = self.data_joiner.join_multimodal_data()
-        
+
         # Step 2: Process each record
         processed_records = []
-        
+        failed_count = 0
+
         for idx, row in tqdm(joined_data.iterrows(), total=len(joined_data)):
             try:
                 record = self.process_single_record(row)
                 if record is not None:
                     processed_records.append(record)
+                else:
+                    failed_count += 1
+                    if failed_count % 100 == 0:
+                        logger.warning(f"Failed to process {failed_count} records so far")
+            except KeyboardInterrupt:
+                logger.warning(f"Interrupted by user at record {idx}. Saving {len(processed_records)} successfully processed records...")
+                break
             except Exception as e:
-                logger.error(f"Error processing record {idx}: {e}")
+                failed_count += 1
+                logger.error(f"Error processing record {idx} (subject_id={row.get('subject_id', 'unknown')}): {e}")
+                if failed_count % 100 == 0:
+                    logger.warning(f"Failed to process {failed_count} records so far")
                 continue
-        
+
+        logger.info(f"Processing complete! Successfully processed {len(processed_records)} records, failed {failed_count} records")
+
         # Step 3: Create train/val/test splits
-        self.create_splits(processed_records)
-        
-        logger.info("Dataset creation completed!")
+        if len(processed_records) > 0:
+            self.create_splits(processed_records)
+            logger.info("Dataset creation completed!")
+        else:
+            logger.error("No records were successfully processed!")
         
     def process_single_record(self, row: pd.Series) -> Optional[Dict]:
         """Process a single multimodal record"""
