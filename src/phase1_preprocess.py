@@ -1036,10 +1036,11 @@ class DatasetCreator:
             # Clear image cache after each batch to free memory
             self.image_preprocessor._image_cache.clear()
 
-            # Save intermediate batch every 2 batches to prevent OOM
+            # Save intermediate batch after EVERY batch to prevent OOM
             # Using torch.save() instead of pickle for memory-efficient tensor serialization
+            # Save every batch (50 records) instead of every 2 batches (100 records)
             current_batch_num = batch_start // batch_size + 1
-            if current_batch_num % 2 == 0 and len(processed_records) > 0:
+            if len(processed_records) > 0:
                 logger.info(f"Saving intermediate batch checkpoint at batch {current_batch_num} ({len(processed_records)} total records)...")
                 self.save_intermediate_batch(processed_records, current_batch_num)
                 processed_records = []  # Clear from memory after saving
