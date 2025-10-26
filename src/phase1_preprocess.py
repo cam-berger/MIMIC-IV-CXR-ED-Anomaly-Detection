@@ -354,12 +354,15 @@ class MIMICDataJoiner:
         # Load data
         cxr_metadata = self.load_mimic_cxr_metadata()
         ed_data = self.load_mimic_iv_ed()
-        
+
         # Join on subject_id and time windows
         logger.info("Joining CXR images with ED data...")
-        
+
         joined_data = []
-        
+        no_ed_match_count = 0
+        no_image_found_count = 0
+        successful_joins = 0
+
         for idx, cxr_row in tqdm(cxr_metadata.iterrows(), total=len(cxr_metadata)):
             subject_id = cxr_row['subject_id']
 
@@ -373,38 +376,67 @@ class MIMICDataJoiner:
             study_time = pd.to_datetime(study_datetime_str, format='%Y%m%d %H%M%S')
 
             # Find matching ED stay within 24 hours
+            match_found = False
             if 'edstays' in ed_data:
                 ed_stays = ed_data['edstays'][ed_data['edstays']['subject_id'] == subject_id]
-                
+
+                if ed_stays.empty:
+                    no_ed_match_count += 1
+                    continue
+
                 for _, ed_row in ed_stays.iterrows():
                     ed_time = pd.to_datetime(ed_row['intime'])
                     time_diff = abs((study_time - ed_time).total_seconds() / 3600)
-                    
+
                     if time_diff <= 24:  # Within 24 hours
+                        # Get image path and verify it exists before adding to joined data
+                        image_path = self._get_image_path(cxr_row)
+
+                        # Verify image exists before adding to joined data
+                        if not self.gcs_helper.path_exists(image_path):
+                            no_image_found_count += 1
+                            logger.debug(f"Image not found: {image_path} (subject_id={subject_id})")
+                            match_found = True  # Had ED match but no image
+                            break
+
                         # Collect all clinical data
                         clinical_data = self._collect_clinical_data(subject_id, ed_row, ed_data)
-                        
+
                         # Create pseudo-note
                         pseudo_note = self.create_pseudo_notes(clinical_data)
-                        
+
                         joined_record = {
                             'subject_id': subject_id,
                             'study_id': cxr_row['study_id'],
                             'dicom_id': cxr_row['dicom_id'],
-                            'image_path': self._get_image_path(cxr_row),
+                            'image_path': image_path,
                             'pseudo_note': pseudo_note,
                             'clinical_data': json.dumps(clinical_data),
                             'ed_stay_id': ed_row['stay_id'],
                             'study_time': study_time,
                             'ed_time': ed_time
                         }
-                        
+
                         joined_data.append(joined_record)
+                        successful_joins += 1
+                        match_found = True
                         break
-        
+
+            if not match_found and 'edstays' in ed_data:
+                no_ed_match_count += 1
+
+        # Log detailed statistics
+        logger.info("=" * 60)
+        logger.info("Multimodal Data Joining Statistics:")
+        logger.info(f"  Total CXR records processed: {len(cxr_metadata):,}")
+        logger.info(f"  Successful joins (with existing images): {successful_joins:,}")
+        logger.info(f"  No ED match found (no ED visit within 24hrs): {no_ed_match_count:,}")
+        logger.info(f"  Image file not found in storage: {no_image_found_count:,}")
+        logger.info(f"  Success rate: {successful_joins/len(cxr_metadata)*100:.2f}%")
+        logger.info("=" * 60)
+
         result_df = pd.DataFrame(joined_data)
-        logger.info(f"Successfully joined {len(result_df)} multimodal records")
-        
+
         return result_df
     
     def _collect_clinical_data(self, subject_id: int, ed_row: pd.Series, 
@@ -438,11 +470,21 @@ class MIMICDataJoiner:
         return clinical_data
     
     def _get_image_path(self, cxr_row: pd.Series) -> str:
-        """Get the full path to the image file"""
-        # MIMIC-CXR directory structure: files/p10/p10000032/s50414267/...
-        patient_folder = f"p{str(cxr_row['subject_id'])[:2]}"
-        subject_folder = f"p{cxr_row['subject_id']}"
-        study_folder = f"s{cxr_row['study_id']}"
+        """
+        Get the full path to the image file
+
+        MIMIC-CXR uses 8-digit padded IDs for directory structure:
+        - subject_id 1234 -> 00001234 -> p10/p00001234
+        - subject_id 10000032 -> 10000032 -> p10/p10000032
+        """
+        # MIMIC-CXR uses 8-digit padded subject IDs and study IDs
+        subject_id_padded = str(cxr_row['subject_id']).zfill(8)
+        study_id_padded = str(cxr_row['study_id']).zfill(8)
+
+        # Directory structure: first 2 digits of padded ID determine patient folder
+        patient_folder = f"p{subject_id_padded[:2]}"
+        subject_folder = f"p{subject_id_padded}"
+        study_folder = f"s{study_id_padded}"
 
         if self.config.use_gcs:
             # For GCS, construct path from root (files are at bucket root)
@@ -491,11 +533,28 @@ class ImagePreprocessor:
             return self._image_cache[image_path]
 
         try:
+            # First check if file exists (already done in calling code, but double-check)
+            if not self.gcs_helper.path_exists(image_path):
+                logger.error(f"Image file does not exist: {image_path}")
+                return None
+
             # Download once from GCS
             if self.config.use_gcs:
                 bucket = self.gcs_helper._get_bucket_for_path(image_path)
                 blob = bucket.blob(image_path)
+
+                # Verify blob exists
+                if not blob.exists():
+                    logger.error(f"GCS blob does not exist: gs://{bucket.name}/{image_path}")
+                    return None
+
+                # Download data
                 data = blob.download_as_bytes()
+
+                # Validate downloaded data
+                if not data or len(data) == 0:
+                    logger.error(f"Empty data downloaded for: {image_path}")
+                    return None
 
                 # Create PIL image
                 pil_image = Image.open(BytesIO(data)).convert('RGB')
@@ -503,10 +562,20 @@ class ImagePreprocessor:
                 # Create cv2 image (grayscale)
                 img_array = np.frombuffer(data, np.uint8)
                 cv2_image = cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)
+
+                # Validate decoded images
+                if cv2_image is None:
+                    logger.error(f"Failed to decode image with cv2: {image_path}")
+                    return None
             else:
                 # Local filesystem
                 pil_image = Image.open(image_path).convert('RGB')
                 cv2_image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+
+                # Validate loaded images
+                if cv2_image is None:
+                    logger.error(f"Failed to load image with cv2: {image_path}")
+                    return None
 
             # Cache the result
             result = (pil_image, cv2_image)
@@ -522,7 +591,7 @@ class ImagePreprocessor:
             return result
 
         except Exception as e:
-            logger.error(f"Error downloading image {image_path}: {e}")
+            logger.error(f"Error downloading/processing image {image_path}: {e}")
             return None
 
     def preprocess_image_and_attention(self, image_path: str) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
@@ -912,9 +981,16 @@ class DatasetCreator:
     def process_single_record(self, row: pd.Series) -> Optional[Dict]:
         """Process a single multimodal record"""
 
+        # Validate image path exists first
+        image_path = row['image_path']
+        if not self.image_preprocessor.gcs_helper.path_exists(image_path):
+            logger.warning(f"Image not found: {image_path} (subject_id={row.get('subject_id', 'unknown')})")
+            return None
+
         # Process image and extract attention regions in one pass (optimized)
-        image_tensor, attention_mask = self.image_preprocessor.preprocess_image_and_attention(row['image_path'])
+        image_tensor, attention_mask = self.image_preprocessor.preprocess_image_and_attention(image_path)
         if image_tensor is None:
+            logger.error(f"Failed to process existing image: {image_path} (subject_id={row.get('subject_id', 'unknown')})")
             return None
         
         # Process pseudo-note
