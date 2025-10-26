@@ -359,8 +359,14 @@ class MIMICDataJoiner:
         
         for idx, cxr_row in tqdm(cxr_metadata.iterrows(), total=len(cxr_metadata)):
             subject_id = cxr_row['subject_id']
-            study_time = pd.to_datetime(cxr_row['StudyDate'])
-            
+
+            # Combine StudyDate and StudyTime into a single datetime
+            # StudyDate format: YYYYMMDD, StudyTime format: HHMMSS
+            study_date_str = str(cxr_row['StudyDate'])
+            study_time_str = str(cxr_row.get('StudyTime', '000000')).zfill(6)  # Pad with zeros if needed
+            study_datetime_str = f"{study_date_str} {study_time_str}"
+            study_time = pd.to_datetime(study_datetime_str, format='%Y%m%d %H%M%S')
+
             # Find matching ED stay within 24 hours
             if 'edstays' in ed_data:
                 ed_stays = ed_data['edstays'][ed_data['edstays']['subject_id'] == subject_id]
