@@ -45,6 +45,8 @@ def run_phase1_preprocessing(args):
         "--output-path", f"{args.output_path}_raw",  # Temporary output
         "--image-size", str(args.image_size),
         "--max-text-length", str(args.max_text_length),
+        "--batch-size", str(args.batch_size),
+        "--num-workers", str(args.num_workers),
     ]
 
     if args.reflacx_path:
@@ -133,6 +135,12 @@ def main():
     parser.add_argument('--max-text-length', type=int, default=8192,
                        help='Max text length for ModernBERT')
 
+    # Performance optimization
+    parser.add_argument('--batch-size', type=int, default=100,
+                       help='Number of records to process in each batch for parallel downloading (default: 100)')
+    parser.add_argument('--num-workers', type=int, default=4,
+                       help='Number of parallel workers for image downloading (default: 4)')
+
     # Filtering options
     parser.add_argument('--aggressive-filtering', action='store_true',
                        help='Use aggressive leakage filtering')
@@ -156,6 +164,8 @@ def main():
     logger.info(f"Output Path: gs://{args.gcs_bucket}/{args.output_path}")
     logger.info(f"Image Size: {args.image_size}")
     logger.info(f"Max Text Length: {args.max_text_length}")
+    logger.info(f"Batch Size: {args.batch_size}")
+    logger.info(f"Num Workers: {args.num_workers}")
     logger.info(f"Aggressive Filtering: {args.aggressive_filtering}")
     logger.info("=" * 80)
 
