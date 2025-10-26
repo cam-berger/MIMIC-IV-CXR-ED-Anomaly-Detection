@@ -19,7 +19,7 @@ PROJECT_ID="${1:-}"
 BUCKET_NAME="${2:-bergermimiciv}"
 VM_NAME="mimic-preprocessing-$(date +%Y%m%d-%H%M%S)"
 ZONE="us-central1-a"
-MACHINE_TYPE="n1-highmem-8"  # 8 vCPUs, 52GB RAM
+MACHINE_TYPE="n1-standard-4"  # 4 vCPUs, 15GB RAM
 BOOT_DISK_SIZE="200GB"
 GIT_REPO="https://github.com/cam-berger/MIMIC-IV-CXR-ED-Anomaly-Detection.git"  # Update this!
 
