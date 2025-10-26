@@ -208,6 +208,71 @@ class GCSHelper:
                 pickle.dump(data, f)
             logger.info(f"Saved locally: {path}")
 
+    def write_torch(self, data, path):
+        """
+        Write data using torch.save() - much more memory efficient for PyTorch tensors
+
+        Args:
+            data: Data to save (typically list of dicts with tensors)
+            path: Output path (will use .pt extension)
+        """
+        import torch
+        import tempfile
+
+        if self.output_bucket:
+            # Save to temporary file first, then upload
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp_file:
+                tmp_path = tmp_file.name
+                torch.save(data, tmp_path)
+
+            # Upload to GCS
+            gcs_key = path if isinstance(path, str) else str(path)
+            blob = self.output_bucket.blob(gcs_key)
+            blob.upload_from_filename(tmp_path)
+
+            # Clean up temp file
+            Path(tmp_path).unlink()
+            logger.info(f"Saved to GCS using torch.save: gs://{self.output_bucket.name}/{gcs_key}")
+        else:
+            # Save locally using torch.save
+            torch.save(data, path)
+            logger.info(f"Saved locally using torch.save: {path}")
+
+    def read_torch(self, path):
+        """
+        Read data using torch.load() - companion to write_torch()
+
+        Args:
+            path: Path to .pt file
+
+        Returns:
+            Loaded data
+        """
+        import torch
+        import tempfile
+
+        if self.output_bucket:
+            # Download from GCS to temp file, then load
+            gcs_key = path if isinstance(path, str) else str(path)
+            blob = self.output_bucket.blob(gcs_key)
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp_file:
+                tmp_path = tmp_file.name
+                blob.download_to_filename(tmp_path)
+
+            # Load from temp file
+            data = torch.load(tmp_path, map_location='cpu')
+
+            # Clean up temp file
+            Path(tmp_path).unlink()
+            logger.info(f"Loaded from GCS using torch.load: gs://{self.output_bucket.name}/{gcs_key}")
+            return data
+        else:
+            # Load locally using torch.load
+            data = torch.load(path, map_location='cpu')
+            logger.info(f"Loaded locally using torch.load: {path}")
+            return data
+
     def write_json(self, data, path):
         """Write JSON file to GCS or local"""
         if self.output_bucket:
@@ -971,18 +1036,14 @@ class DatasetCreator:
             # Clear image cache after each batch to free memory
             self.image_preprocessor._image_cache.clear()
 
-            # CRITICAL: Save and clear processed_records every 2 batches to prevent OOM
-            # With 14GB RAM and ~60MB/record, can safely hold ~200 records (2 batches of 100)
-            # After that, save to disk and clear from memory
-            save_frequency = 2  # Save every 2 batches
-            if (batch_start // batch_size + 1) % save_frequency == 0 and len(processed_records) > 0:
-                batch_num = batch_start // batch_size + 1
-                logger.info(f"Saving intermediate batch checkpoint at batch {batch_num} ({len(processed_records)} total records)...")
-                self.save_intermediate_batch(processed_records, batch_num)
-                # Clear processed records to free memory
-                processed_records = []
+            # Save intermediate batch every 2 batches to prevent OOM
+            # Using torch.save() instead of pickle for memory-efficient tensor serialization
+            if (batch_idx + 1) % 2 == 0 and len(processed_records) > 0:
+                logger.info(f"Saving intermediate batch checkpoint at batch {batch_idx + 1} ({len(processed_records)} total records)...")
+                self.save_intermediate_batch(processed_records, batch_idx + 1)
+                processed_records = []  # Clear from memory after saving
                 import gc
-                gc.collect()
+                gc.collect()  # Force garbage collection to free memory immediately
 
         logger.info(f"Processing complete! Successfully processed {len(processed_records)}/{total_records} records, failed {failed_count} records")
 
@@ -1070,25 +1131,34 @@ class DatasetCreator:
 
     def save_intermediate_batch(self, records: List[Dict], batch_num: int):
         """
-        Save intermediate batch to disk to free memory
+        Save intermediate batch to disk to free memory using torch.save()
+
+        torch.save() is much more memory-efficient than pickle for PyTorch tensors
+        because it doesn't create temporary copies during serialization.
 
         Args:
             records: List of processed records
             batch_num: Batch number for filenaming
         """
+        import gc
+
         if self.config.use_gcs:
-            output_file = f"{self.config.output_path}/intermediate_batch_{batch_num:04d}.pkl"
+            output_file = f"{self.config.output_path}/intermediate_batch_{batch_num:04d}.pt"
         else:
             output_dir = Path(self.config.output_path)
             output_dir.mkdir(parents=True, exist_ok=True)
-            output_file = output_dir / f"intermediate_batch_{batch_num:04d}.pkl"
+            output_file = output_dir / f"intermediate_batch_{batch_num:04d}.pt"
 
-        self.gcs_helper.write_pickle(records, output_file)
+        # Use torch.save instead of pickle - much more memory efficient for tensors
+        self.gcs_helper.write_torch(records, output_file)
         logger.info(f"Saved intermediate batch {batch_num} with {len(records)} records to {output_file}")
+
+        # Force garbage collection to free memory immediately
+        gc.collect()
 
     def load_all_intermediate_batches(self) -> List[Dict]:
         """
-        Load all intermediate batch files and combine them
+        Load all intermediate batch files and combine them using torch.load()
 
         Returns:
             Combined list of all records from intermediate batches
@@ -1107,17 +1177,30 @@ class DatasetCreator:
             blobs = bucket.list_blobs(prefix=prefix)
 
             for blob in blobs:
-                if blob.name.endswith('.pkl'):
-                    logger.info(f"Loading intermediate batch: {blob.name}")
+                # Load both .pt (torch) and .pkl (legacy pickle) files
+                if blob.name.endswith('.pt'):
+                    logger.info(f"Loading intermediate batch (torch): {blob.name}")
+                    records = self.gcs_helper.read_torch(blob.name)
+                    all_records.extend(records)
+                elif blob.name.endswith('.pkl'):
+                    logger.info(f"Loading intermediate batch (pickle): {blob.name}")
                     records = self.gcs_helper.read_pickle(blob.name)
                     all_records.extend(records)
         else:
             # List all intermediate batch files locally
             output_dir = Path(self.config.output_path)
-            batch_files = sorted(output_dir.glob("intermediate_batch_*.pkl"))
 
-            for batch_file in batch_files:
-                logger.info(f"Loading intermediate batch: {batch_file}")
+            # Load .pt files (torch format - preferred)
+            batch_files_pt = sorted(output_dir.glob("intermediate_batch_*.pt"))
+            for batch_file in batch_files_pt:
+                logger.info(f"Loading intermediate batch (torch): {batch_file}")
+                records = self.gcs_helper.read_torch(str(batch_file))
+                all_records.extend(records)
+
+            # Also load legacy .pkl files if they exist
+            batch_files_pkl = sorted(output_dir.glob("intermediate_batch_*.pkl"))
+            for batch_file in batch_files_pkl:
+                logger.info(f"Loading intermediate batch (pickle): {batch_file}")
                 records = self.gcs_helper.read_pickle(str(batch_file))
                 all_records.extend(records)
 
