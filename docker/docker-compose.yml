@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  # Default service: Local testing with mounted MIMIC data
+  mimic-preprocessing:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: mimic-iv-cxr-ed-preprocessing:latest
+    container_name: mimic-preprocessing
+    volumes:
+      - ${MIMIC_DATA_PATH:-~/Documents/Portfolio/MIMIC_Data/physionet.org/files}:/data/mimic_data:ro
+      - ${OUTPUT_PATH:-./output}:/data/output
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NUM_SAMPLES=${NUM_SAMPLES:-10}
+    command: >
+      python src/test_phase1_local.py
+      --mimic-path /data/mimic_data
+      --output-path /data/output
+      --num-samples ${NUM_SAMPLES:-10}
+
+  # Local testing profile (pure local, no cloud)
+  mimic-local-test:
+    profiles: ["test"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: mimic-iv-cxr-ed-preprocessing:latest
+    container_name: mimic-local-test
+    volumes:
+      - ${MIMIC_DATA_PATH:-~/Documents/Portfolio/MIMIC_Data/physionet.org/files}:/data/mimic_data:ro
+      - ${OUTPUT_PATH:-./test_output}:/data/output
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: >
+      python src/test_phase1_local.py
+      --mimic-path /data/mimic_data
+      --output-path /data/output
+      --num-samples ${NUM_SAMPLES:-5}
+      --test-images
+      --num-images ${NUM_IMAGES:-3}
+
+  # GCS preprocessing profile (full pipeline with Google Cloud Storage)
+  mimic-gcs-preprocessing:
+    profiles: ["gcs"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: mimic-iv-cxr-ed-preprocessing:latest
+    container_name: mimic-gcs-preprocessing
+    volumes:
+      # Mount GCP credentials
+      - ${GOOGLE_APPLICATION_CREDENTIALS}:/credentials/gcp-key.json:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GOOGLE_APPLICATION_CREDENTIALS=/credentials/gcp-key.json
+      - GCS_BUCKET=${GCS_BUCKET:-bergermimiciv}
+      - GCS_CXR_BUCKET=${GCS_CXR_BUCKET:-mimic-cxr-jpg-2.1.0.physionet.org}
+      - GCS_PROJECT_ID=${GCS_PROJECT_ID}
+    command: >
+      python src/phase1_preprocess.py
+      --gcs-bucket ${GCS_BUCKET:-bergermimiciv}
+      --gcs-cxr-bucket ${GCS_CXR_BUCKET:-mimic-cxr-jpg-2.1.0.physionet.org}
+      --gcs-project-id ${GCS_PROJECT_ID}
+      --output-gcs-bucket ${GCS_BUCKET:-bergermimiciv}
+      --mimic-iv-path physionet.org/files/mimiciv/3.1
+      --mimic-ed-path physionet.org/files/mimic-iv-ed/2.2
+      --image-size 518
+      --max-text-length 8192

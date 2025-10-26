@@ -69,14 +69,18 @@ MIMIC-IV-ED (Your Bucket)          MIMIC-CXR (PhysioNet's Bucket)
 ### 1. Prerequisites
 
 ```bash
-# Install dependencies
-pip install pandas numpy tqdm pillow opencv-python-headless
-pip install torch torchvision transformers sentence-transformers faiss-cpu
-pip install google-cloud-storage  # For GCS support
+# Install core dependencies
+pip install -r requirements.txt
 
 # Authenticate with Google Cloud
 gcloud auth login
+gcloud auth application-default login
 gcloud config set project YOUR_PROJECT_ID
+
+# Optional: Install spaCy for enhanced leakage filtering (not required)
+# pip install spacy>=3.5.0 scispacy>=0.5.0
+# python -m spacy download en_core_web_sm
+# pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/en_core_sci_md-0.5.1.tar.gz
 ```
 
 ### 2. Local Testing (Recommended First)
@@ -94,7 +98,26 @@ python src/test_phase1_local.py \
 
 ### 3. Google Cloud Setup
 
-Upload your data and run preprocessing:
+**First: Authenticate with Google Cloud**
+
+```bash
+# Install gcloud CLI if not already installed
+# See: https://cloud.google.com/sdk/docs/install
+
+# Authenticate with your Google account
+gcloud auth login
+
+# Set up Application Default Credentials (ADC) for Python SDK
+gcloud auth application-default login
+
+# Set your project
+gcloud config set project YOUR_PROJECT_ID
+
+# Verify authentication
+gcloud auth list
+```
+
+**Upload your data and run preprocessing:**
 
 ```bash
 # Upload MIMIC-IV and MIMIC-IV-ED to your bucket
@@ -104,23 +127,30 @@ gsutil -m cp -r ~/MIMIC_Data/physionet.org/files/mimiciv \
 gsutil -m cp -r ~/MIMIC_Data/physionet.org/files/mimic-iv-ed \
   gs://bergermimiciv/physionet.org/files/
 
-# Create a Compute Engine VM
+# OPTION A: Automated Deployment (Recommended)
+# Automatically creates VM, installs dependencies, runs full pipeline, auto-shuts down
+bash scripts/deploy_gcp.sh YOUR_PROJECT_ID bergermimiciv
+
+# OPTION B: Manual Deployment
+# Create VM and run pipeline manually
 gcloud compute instances create mimic-preprocessing \
   --zone=us-central1-a \
-  --machine-type=n1-standard-8 \
-  --accelerator=type=nvidia-tesla-t4,count=1
+  --machine-type=n1-highmem-8 \
+  --boot-disk-size=200GB \
+  --scopes=cloud-platform
 
-# SSH and run preprocessing
-gcloud compute ssh mimic-preprocessing
-python src/phase1_preprocess.py \
+# SSH and run full pipeline (preprocessing + leakage filtering)
+gcloud compute ssh mimic-preprocessing --zone=us-central1-a
+python src/run_full_pipeline.py \
   --gcs-bucket bergermimiciv \
   --gcs-cxr-bucket mimic-cxr-jpg-2.1.0.physionet.org \
-  --output-gcs-bucket bergermimiciv \
-  --mimic-cxr-path physionet.org/files/mimic-cxr-jpg/2.1.0 \
+  --gcs-project-id YOUR_PROJECT_ID \
   --mimic-iv-path physionet.org/files/mimiciv/3.1 \
-  --mimic-ed-path physionet.org/files/mimic-iv-ed/2.2
+  --mimic-ed-path physionet.org/files/mimic-iv-ed/2.2 \
+  --output-path processed/phase1_final \
+  --aggressive-filtering
 
-# See docs/GCS_SETUP.md for detailed guide
+# See docs/GCP_DEPLOYMENT.md for complete deployment guide
 ```
 
 ## Project Structure
@@ -176,7 +206,75 @@ python src/phase1_preprocess.py \
    - Train (70%), Val (15%), Test (15%)
    - Save as pickle files to output bucket
 
-See [PSEUDO_NOTES_EXPLAINED.md](PSEUDO_NOTES_EXPLAINED.md) for detailed explanation.
+### Expected Output
+
+After running the preprocessing pipeline, you'll find these files in your output directory (`processed/phase1_preprocess/` or `gs://bergermimiciv/processed/phase1_preprocess/`):
+
+```
+processed/phase1_preprocess/
+├── train_data.pkl          # Training set (70% of data)
+├── val_data.pkl            # Validation set (15% of data)
+├── test_data.pkl           # Test set (15% of data)
+└── metadata.json           # Dataset metadata and configuration
+```
+
+**Each record in the pickle files contains:**
+```python
+{
+    'subject_id': int,              # Patient identifier
+    'study_id': int,                # Imaging study identifier
+    'image_tensor': torch.Tensor,   # Preprocessed image (518x518x3)
+    'attention_mask': np.array,     # Attention regions from edge detection
+    'text_input_ids': List[int],    # Tokenized text (ModernBERT)
+    'text_attention_mask': List[int],  # Text attention mask
+    'enhanced_note': str,           # RAG-enhanced pseudo-note
+    'attention_segments': Dict,     # Cross-attention preparation
+    'clinical_data': Dict,          # Original clinical features
+    'labels': Dict                  # Disease labels, bboxes, severity scores
+}
+```
+
+**metadata.json contains:**
+```json
+{
+    "config": {...},              # Full preprocessing configuration
+    "n_train": 12345,            # Number of training samples
+    "n_val": 2647,               # Number of validation samples
+    "n_test": 2647,              # Number of test samples
+    "total_records": 17639       # Total records processed
+}
+```
+
+See [PSEUDO_NOTES_EXPLAINED.md](PSEUDO_NOTES_EXPLAINED.md) for detailed explanation of pseudo-note generation.
+
+### Phase 1b: Diagnosis Leakage Filtering (Optional)
+
+To prevent data leakage, you can filter the pseudo-notes to remove diagnosis-related information:
+
+```bash
+# Apply leakage filtering to preprocessed data
+python src/apply_leakage_filter.py \
+  --gcs-bucket bergermimiciv \
+  --gcs-cxr-bucket mimic-cxr-jpg-2.1.0.physionet.org \
+  --gcs-project-id YOUR_PROJECT_ID \
+  --input-path processed/phase1_preprocess \
+  --output-path processed/phase1_filtered \
+  --aggressive
+```
+
+**What it does:**
+- Loads CheXpert labels for each X-ray
+- Removes diagnosis-related terms from pseudo-notes using regex patterns
+- Filters radiological language ("chest x-ray shows...")
+- Removes diagnostic medications and lab values
+- Validates that diagnosis information is removed
+
+**Note:** The leakage filter works via regex pattern matching (no additional dependencies required). Installing spaCy models (see Prerequisites above) enables optional entity extraction features, but is not required for core functionality.
+
+**Output:** Filtered train/val/test splits in `processed/phase1_filtered/` with:
+- `enhanced_note` → diagnosis information removed
+- `positive_findings` → CheXpert labels preserved for training
+- `filter_stats` → metrics on what was filtered
 
 ## Configuration
 
@@ -257,11 +355,40 @@ python src/test_phase1_local.py --num-samples 10 --test-images --num-images 3
 python src/phase1_preprocess.py \
   --gcs-bucket bergermimiciv \
   --gcs-cxr-bucket mimic-cxr-jpg-2.1.0.physionet.org \
+  --gcs-project-id YOUR_PROJECT_ID \
   --image-size 224 \
   --max-text-length 512
 ```
 
 ## Troubleshooting
+
+### "DefaultCredentialsError: Your default credentials were not found"
+
+**Problem:** Google Cloud authentication not configured.
+
+**Solution:**
+```bash
+# Set up Application Default Credentials
+gcloud auth application-default login
+
+# Set your project (required for requester pays)
+gcloud config set project YOUR_PROJECT_ID
+
+# Verify
+gcloud auth list
+```
+
+### "BadRequestException: Bucket is a requester pays bucket but no user project provided"
+
+**Problem:** PhysioNet bucket requires your project ID for billing.
+
+**Solution:** Always include `--gcs-project-id` when using the PhysioNet bucket:
+```bash
+python src/phase1_preprocess.py \
+  --gcs-bucket bergermimiciv \
+  --gcs-cxr-bucket mimic-cxr-jpg-2.1.0.physionet.org \
+  --gcs-project-id YOUR_PROJECT_ID
+```
 
 ### "No ED stays available"
 - Check that MIMIC-IV-ED is in `mimic-iv-ed/2.2/ed/`, not `mimiciv/3.1/ed/`

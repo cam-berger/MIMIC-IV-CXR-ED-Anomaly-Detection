@@ -19,6 +19,10 @@ transformers>=4.30.0
 sentence-transformers>=2.2.0
 tokenizers>=0.13.0
 
+# Optional: For enhanced leakage filtering (not required for basic functionality)
+# spacy>=3.5.0
+# scispacy>=0.5.0
+
 # Vector Search (RAG)
 faiss-cpu>=1.7.0
 
@@ -28,3 +32,19 @@ google-cloud-storage>=2.10.0
 # Optional: For notebook development
 # jupyter>=1.0.0
 # ipywidgets>=8.0.0
+
+# =============================================================================
+# OPTIONAL DEPENDENCIES
+# =============================================================================
+#
+# For Enhanced Leakage Filtering (optional - basic filtering works without these):
+#
+# 1. Install spaCy and scispacy:
+#    pip install spacy>=3.5.0 scispacy>=0.5.0
+#
+# 2. Download language models:
+#    python -m spacy download en_core_web_sm
+#    pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/en_core_sci_md-0.5.1.tar.gz
+#
+# Note: The leakage filter works via regex pattern matching without spaCy.
+# spaCy only adds entity extraction (minor enhancement).

@@ -1,0 +1,77 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Claude IDE
+.claude/
+
+# Documentation (keep only essential)
+docs/
+*.md
+!README.md
+!LOCAL_TESTING.md
+!PSEUDO_NOTES_EXPLAINED.md
+
+# Test outputs
+test_output/
+*.pkl
+*.json
+
+# Data directories
+data/
+MIMIC_Data/
+*.csv
+*.csv.gz
+
+# Logs
+*.log
+logs/
+
+# MacOS
+.DS_Store
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# AWS/Old files
+scripts/
+config/aws_config.yaml
+DEPLOYMENT_*.md
+MIGRATION_*.md
+
+# Docker (exclude from image, but NOT from build context)
+# docker/
+# Dockerfile
+# docker-compose.yml
+# .dockerignore

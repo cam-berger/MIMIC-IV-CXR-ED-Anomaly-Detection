@@ -65,6 +65,7 @@ class DataConfig:
     gcs_bucket: Optional[str] = None  # Your bucket (e.g., "bergermimiciv")
     gcs_cxr_bucket: Optional[str] = None  # MIMIC-CXR bucket (e.g., "mimic-cxr-jpg-2.1.0.physionet.org")
     output_gcs_bucket: Optional[str] = None  # Output bucket (usually same as gcs_bucket)
+    gcs_project_id: Optional[str] = None  # GCP project ID for requester pays buckets
 
     # Image settings (BiomedCLIP-CXR requirements)
     image_size: int = 518  # Higher resolution than MDF-Net's 224
@@ -112,17 +113,21 @@ class GCSHelper:
             if not GCS_AVAILABLE:
                 raise ImportError("google-cloud-storage is not installed. Run: pip install google-cloud-storage")
 
-            self.gcs_client = storage.Client()
+            # Initialize client with project for requester pays
+            if config.gcs_project_id:
+                self.gcs_client = storage.Client(project=config.gcs_project_id)
+            else:
+                self.gcs_client = storage.Client()
 
             # Initialize your main bucket (MIMIC-IV, MIMIC-IV-ED, etc.)
             if config.gcs_bucket:
                 self.bucket = self.gcs_client.bucket(config.gcs_bucket)
                 logger.info(f"Initialized GCS client for bucket: {config.gcs_bucket}")
 
-            # Initialize separate MIMIC-CXR bucket (PhysioNet's public bucket)
+            # Initialize separate MIMIC-CXR bucket (PhysioNet's requester pays bucket)
             if config.gcs_cxr_bucket:
-                self.cxr_bucket = self.gcs_client.bucket(config.gcs_cxr_bucket)
-                logger.info(f"Initialized GCS MIMIC-CXR bucket: {config.gcs_cxr_bucket}")
+                self.cxr_bucket = self.gcs_client.bucket(config.gcs_cxr_bucket, user_project=config.gcs_project_id)
+                logger.info(f"Initialized GCS MIMIC-CXR bucket: {config.gcs_cxr_bucket} (requester pays)")
 
             # Initialize output bucket
             if config.output_gcs_bucket:
@@ -132,8 +137,10 @@ class GCSHelper:
     def _get_bucket_for_path(self, path: str):
         """Determine which bucket to use based on path"""
         path_str = str(path)
-        # If path contains mimic-cxr-jpg and we have a separate CXR bucket, use it
-        if 'mimic-cxr-jpg' in path_str and self.cxr_bucket:
+        # If path is for MIMIC-CXR data and we have a separate CXR bucket, use it
+        # Check for either directory path or MIMIC-CXR metadata files
+        cxr_indicators = ['mimic-cxr-jpg', 'mimic-cxr-2.0.0', 'files/p']
+        if self.cxr_bucket and any(indicator in path_str for indicator in cxr_indicators):
             return self.cxr_bucket
         # Otherwise use main bucket
         return self.bucket
@@ -227,7 +234,11 @@ class MIMICDataJoiner:
     def load_mimic_cxr_metadata(self) -> pd.DataFrame:
         """Load MIMIC-CXR metadata"""
         if self.config.use_gcs:
-            metadata_path = f"{self.config.mimic_cxr_path}/mimic-cxr-2.0.0-metadata.csv.gz"
+            # For GCS, mimic_cxr_path should be empty/root since files are at bucket root
+            if self.config.mimic_cxr_path:
+                metadata_path = f"{self.config.mimic_cxr_path}/mimic-cxr-2.0.0-metadata.csv.gz"
+            else:
+                metadata_path = "mimic-cxr-2.0.0-metadata.csv.gz"
         else:
             metadata_path = Path(self.config.mimic_cxr_path) / "mimic-cxr-2.0.0-metadata.csv"
 
@@ -403,15 +414,24 @@ class MIMICDataJoiner:
     
     def _get_image_path(self, cxr_row: pd.Series) -> str:
         """Get the full path to the image file"""
-        # MIMIC-CXR directory structure: p10/p10000032/s50414267/...
+        # MIMIC-CXR directory structure: files/p10/p10000032/s50414267/...
         patient_folder = f"p{str(cxr_row['subject_id'])[:2]}"
         subject_folder = f"p{cxr_row['subject_id']}"
         study_folder = f"s{cxr_row['study_id']}"
-        
-        image_path = Path(self.config.mimic_cxr_path) / "files" / patient_folder / \
-                     subject_folder / study_folder / f"{cxr_row['dicom_id']}.jpg"
-        
-        return str(image_path)
+
+        if self.config.use_gcs:
+            # For GCS, construct path from root (files are at bucket root)
+            if self.config.mimic_cxr_path:
+                image_path = f"{self.config.mimic_cxr_path}/files/{patient_folder}/{subject_folder}/{study_folder}/{cxr_row['dicom_id']}.jpg"
+            else:
+                image_path = f"files/{patient_folder}/{subject_folder}/{study_folder}/{cxr_row['dicom_id']}.jpg"
+        else:
+            # For local filesystem
+            image_path = Path(self.config.mimic_cxr_path) / "files" / patient_folder / \
+                         subject_folder / study_folder / f"{cxr_row['dicom_id']}.jpg"
+            image_path = str(image_path)
+
+        return image_path
 
 
 class ImagePreprocessor:
@@ -876,7 +896,7 @@ def main():
         '--mimic-cxr-path',
         type=str,
         default='physionet.org/files/mimic-cxr-jpg/2.1.0',
-        help='Path to MIMIC-CXR dataset (local or S3 prefix)'
+        help='Path to MIMIC-CXR dataset (local path or GCS prefix). Automatically set to "" when using --gcs-cxr-bucket (PhysioNet bucket has files at root)'
     )
 
     parser.add_argument(
@@ -934,6 +954,13 @@ def main():
         type=str,
         default=None,
         help='GCS bucket name for writing output data (if different from input bucket)'
+    )
+
+    parser.add_argument(
+        '--gcs-project-id',
+        type=str,
+        default=None,
+        help='GCP project ID for requester pays buckets (required for PhysioNet public bucket)'
     )
 
     # Processing settings
@@ -998,6 +1025,15 @@ def main():
     config.gcs_bucket = args.gcs_bucket
     config.gcs_cxr_bucket = args.gcs_cxr_bucket
     config.output_gcs_bucket = args.output_gcs_bucket if args.output_gcs_bucket else args.gcs_bucket
+    config.gcs_project_id = args.gcs_project_id
+
+    # For GCS with PhysioNet bucket, set mimic_cxr_path to empty (files are at bucket root)
+    if config.use_gcs and config.gcs_cxr_bucket:
+        config.mimic_cxr_path = ""  # Files are at bucket root in PhysioNet bucket
+
+        # Warn if project ID not provided for requester pays
+        if not config.gcs_project_id:
+            logger.warning("PhysioNet bucket requires --gcs-project-id for requester pays access")
 
     # Update processing settings
     config.image_size = args.image_size
