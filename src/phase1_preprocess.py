@@ -261,7 +261,9 @@ class GCSHelper:
                 blob.download_to_filename(tmp_path)
 
             # Load from temp file
-            data = torch.load(tmp_path, map_location='cpu')
+            # Use weights_only=False to allow loading numpy arrays and custom objects
+            # This is safe since we trust our own checkpoint files
+            data = torch.load(tmp_path, map_location='cpu', weights_only=False)
 
             # Clean up temp file
             Path(tmp_path).unlink()
@@ -269,7 +271,9 @@ class GCSHelper:
             return data
         else:
             # Load locally using torch.load
-            data = torch.load(path, map_location='cpu')
+            # Use weights_only=False to allow loading numpy arrays and custom objects
+            # This is safe since we trust our own checkpoint files
+            data = torch.load(path, map_location='cpu', weights_only=False)
             logger.info(f"Loaded locally using torch.load: {path}")
             return data
 
@@ -969,13 +973,16 @@ class DatasetCreator:
         self.text_preprocessor = TextPreprocessor(config)
         self.rag_enhancer = RAGKnowledgeEnhancer(config)
         
-    def create_dataset(self, batch_size: int = 100, num_workers: int = 4):
+    def create_dataset(self, batch_size: int = 100, num_workers: int = 4,
+                       create_small_samples: bool = False, small_sample_size: int = 100):
         """
         Main dataset creation pipeline with parallel processing
 
         Args:
             batch_size: Number of records to process in each batch
             num_workers: Number of parallel workers for image downloading
+            create_small_samples: Whether to create small sample datasets
+            small_sample_size: Number of records in small sample datasets
         """
         logger.info("Starting dataset creation pipeline...")
         logger.info(f"Using batch_size={batch_size}, num_workers={num_workers}")
@@ -1049,8 +1056,8 @@ class DatasetCreator:
 
         logger.info(f"Processing complete! Successfully processed {len(processed_records)}/{total_records} records, failed {failed_count} records")
 
-        # Step 3: Combine all records (from intermediate batches + remaining in memory)
-        logger.info("Combining all processed records...")
+        # Step 3: Combine all records and create splits (streaming to avoid OOM)
+        logger.info("Combining all processed records and creating splits...")
 
         # Save any remaining records not yet saved
         if len(processed_records) > 0:
@@ -1059,15 +1066,11 @@ class DatasetCreator:
             self.save_intermediate_batch(processed_records, final_batch_num)
             processed_records = []  # Clear from memory
 
-        # Load all intermediate batches
-        all_records = self.load_all_intermediate_batches()
-
-        # Step 4: Create train/val/test splits
-        if len(all_records) > 0:
-            self.create_splits(all_records)
-            logger.info("Dataset creation completed!")
-        else:
-            logger.error("No records were successfully processed!")
+        # Step 4: Create train/val/test splits using streaming (memory-efficient)
+        self.create_splits_from_batches_streaming(
+            create_small_samples=create_small_samples,
+            small_sample_size=small_sample_size
+        )
         
     def process_single_record(self, row: pd.Series) -> Optional[Dict]:
         """Process a single multimodal record"""
@@ -1208,7 +1211,412 @@ class DatasetCreator:
 
         logger.info(f"Loaded {len(all_records)} total records from intermediate batches")
         return all_records
-    
+
+    def get_batch_file_list(self) -> List:
+        """
+        Get list of all intermediate batch files without loading them
+
+        Returns:
+            List of batch file references (blobs for GCS, paths for local)
+        """
+        if self.config.use_gcs:
+            # List all intermediate batch files in GCS
+            from google.cloud import storage
+            prefix = f"{self.config.output_path}/intermediate_batch_"
+
+            client = storage.Client(project=self.config.gcs_project_id)
+            bucket = client.bucket(self.config.gcs_bucket)
+            blobs = list(bucket.list_blobs(prefix=prefix))
+
+            # Filter for .pt files only (ignore legacy .pkl)
+            batch_files = [blob for blob in blobs if blob.name.endswith('.pt')]
+            batch_files.sort(key=lambda b: b.name)
+            logger.info(f"Found {len(batch_files)} intermediate batch files in GCS")
+        else:
+            # List all intermediate batch files locally
+            output_dir = Path(self.config.output_path)
+            batch_files = sorted(output_dir.glob("intermediate_batch_*.pt"))
+            logger.info(f"Found {len(batch_files)} intermediate batch files locally")
+
+        return batch_files
+
+    def count_total_records_streaming(self, batch_files: List) -> int:
+        """
+        Count total records across all batches without loading full data
+
+        Args:
+            batch_files: List of batch file references
+
+        Returns:
+            Total number of records
+        """
+        total_count = 0
+        logger.info("Counting total records...")
+
+        for batch_file in tqdm(batch_files, desc="Counting records"):
+            try:
+                # Load just to count, then immediately discard
+                if self.config.use_gcs:
+                    records = self.gcs_helper.read_torch(batch_file.name)
+                else:
+                    records = self.gcs_helper.read_torch(str(batch_file))
+
+                total_count += len(records)
+                del records  # Free memory immediately
+            except Exception as e:
+                logger.error(f"Error counting records in {batch_file}: {e}")
+
+        logger.info(f"Total records across all batches: {total_count}")
+        return total_count
+
+    def extract_labels_for_stratification(self, batch_files: List) -> Tuple[List[str], List[int]]:
+        """
+        Extract subject_ids and a stratification key from all batches
+        Uses first available class label or defaults to random assignment
+
+        Args:
+            batch_files: List of batch file references
+
+        Returns:
+            Tuple of (record_identifiers, stratification_keys) for all records
+        """
+        record_ids = []
+        strat_keys = []
+
+        logger.info("Extracting labels for stratified splitting...")
+
+        for batch_file in tqdm(batch_files, desc="Extracting labels"):
+            try:
+                # Load batch
+                if self.config.use_gcs:
+                    records = self.gcs_helper.read_torch(batch_file.name)
+                else:
+                    records = self.gcs_helper.read_torch(str(batch_file))
+
+                # Extract identifiers and stratification keys
+                for record in records:
+                    # Use subject_id + study_id as unique identifier
+                    record_id = f"{record['subject_id']}_{record['study_id']}"
+                    record_ids.append(record_id)
+
+                    # Extract stratification key
+                    # Try to use disease labels if available, otherwise use subject_id mod 10 for distribution
+                    labels = record.get('labels', {})
+                    disease_labels = labels.get('disease_labels', [])
+
+                    if disease_labels and len(disease_labels) > 0:
+                        # Use first disease label as stratification key
+                        strat_key = hash(str(disease_labels[0])) % 10
+                    else:
+                        # Use subject_id for deterministic pseudo-random stratification
+                        strat_key = record['subject_id'] % 10
+
+                    strat_keys.append(strat_key)
+
+                del records  # Free memory immediately
+            except Exception as e:
+                logger.error(f"Error extracting labels from {batch_file}: {e}")
+
+        logger.info(f"Extracted {len(record_ids)} record identifiers for stratification")
+        return record_ids, strat_keys
+
+    def create_stratified_split_indices(self, strat_keys: List[int],
+                                       total_count: int) -> Tuple[set, set, set]:
+        """
+        Create stratified train/val/test split indices
+
+        Args:
+            strat_keys: Stratification keys for each record
+            total_count: Total number of records
+
+        Returns:
+            Tuple of (train_indices, val_indices, test_indices) as sets
+        """
+        from collections import defaultdict
+
+        logger.info("Creating stratified split indices...")
+
+        # Group indices by stratification key
+        strat_groups = defaultdict(list)
+        for idx, key in enumerate(strat_keys):
+            strat_groups[key].append(idx)
+
+        # Shuffle each group independently
+        for key in strat_groups:
+            np.random.shuffle(strat_groups[key])
+
+        # Split each group according to train/val/test ratios
+        train_indices = set()
+        val_indices = set()
+        test_indices = set()
+
+        for key, indices in strat_groups.items():
+            n_group = len(indices)
+            n_train = int(n_group * self.config.train_split)
+            n_val = int(n_group * self.config.val_split)
+
+            train_indices.update(indices[:n_train])
+            val_indices.update(indices[n_train:n_train + n_val])
+            test_indices.update(indices[n_train + n_val:])
+
+        logger.info(f"Split sizes: train={len(train_indices)}, val={len(val_indices)}, test={len(test_indices)}")
+        return train_indices, val_indices, test_indices
+
+    def create_splits_from_batches_streaming(self, create_small_samples: bool = False,
+                                             small_sample_size: int = 100):
+        """
+        Create train/val/test splits by streaming through batches (memory-efficient)
+        Implements stratified splitting to evenly distribute classes
+
+        Args:
+            create_small_samples: Whether to create small sample versions
+            small_sample_size: Number of records in small samples
+        """
+        import gc
+
+        logger.info("=" * 60)
+        logger.info("Creating stratified train/val/test splits (streaming mode)")
+        logger.info("=" * 60)
+
+        # Step 1: Get list of batch files
+        batch_files = self.get_batch_file_list()
+
+        if not batch_files:
+            logger.error("No intermediate batch files found!")
+            return
+
+        # Step 2: Count total records
+        total_count = self.count_total_records_streaming(batch_files)
+
+        if total_count == 0:
+            logger.error("No records found in intermediate batches!")
+            return
+
+        # Step 3: Extract labels for stratification
+        record_ids, strat_keys = self.extract_labels_for_stratification(batch_files)
+
+        # Step 4: Create stratified split indices
+        train_indices, val_indices, test_indices = self.create_stratified_split_indices(
+            strat_keys, total_count
+        )
+
+        # Step 5: Stream through batches and write to split files
+        logger.info("Streaming records to split files...")
+
+        # Initialize accumulators for each split
+        train_records = []
+        val_records = []
+        test_records = []
+
+        # Also track small samples
+        train_small = []
+        val_small = []
+        test_small = []
+
+        current_idx = 0
+        write_batch_size = 1000  # Write every 1000 records to avoid memory buildup
+
+        for batch_file in tqdm(batch_files, desc="Writing splits"):
+            try:
+                # Load batch
+                if self.config.use_gcs:
+                    records = self.gcs_helper.read_torch(batch_file.name)
+                else:
+                    records = self.gcs_helper.read_torch(str(batch_file))
+
+                # Assign each record to appropriate split
+                for record in records:
+                    if current_idx in train_indices:
+                        train_records.append(record)
+                        if create_small_samples and len(train_small) < small_sample_size:
+                            train_small.append(record)
+                    elif current_idx in val_indices:
+                        val_records.append(record)
+                        if create_small_samples and len(val_small) < small_sample_size:
+                            val_small.append(record)
+                    elif current_idx in test_indices:
+                        test_records.append(record)
+                        if create_small_samples and len(test_small) < small_sample_size:
+                            test_small.append(record)
+
+                    current_idx += 1
+
+                del records  # Free memory immediately
+                gc.collect()
+
+                # Periodically write accumulated records to free memory
+                if len(train_records) >= write_batch_size:
+                    self._append_to_split_file('train', train_records)
+                    train_records = []
+                    gc.collect()
+
+                if len(val_records) >= write_batch_size:
+                    self._append_to_split_file('val', val_records)
+                    val_records = []
+                    gc.collect()
+
+                if len(test_records) >= write_batch_size:
+                    self._append_to_split_file('test', test_records)
+                    test_records = []
+                    gc.collect()
+
+            except Exception as e:
+                logger.error(f"Error processing {batch_file}: {e}")
+
+        # Write remaining records
+        if train_records:
+            self._append_to_split_file('train', train_records)
+        if val_records:
+            self._append_to_split_file('val', val_records)
+        if test_records:
+            self._append_to_split_file('test', test_records)
+
+        # Combine all split chunks into final files
+        logger.info("Combining split chunks into final files...")
+        self._combine_split_chunks('train')
+        self._combine_split_chunks('val')
+        self._combine_split_chunks('test')
+
+        # Create small samples if requested
+        if create_small_samples:
+            logger.info(f"Creating small sample datasets ({small_sample_size} records each)...")
+            self._save_small_sample('train', train_small)
+            self._save_small_sample('val', val_small)
+            self._save_small_sample('test', test_small)
+
+        # Save metadata
+        metadata = {
+            'config': {k: str(v) for k, v in self.config.__dict__.items()},
+            'n_train': len(train_indices),
+            'n_val': len(val_indices),
+            'n_test': len(test_indices),
+            'total_records': total_count,
+            'stratified': True,
+            'small_samples_created': create_small_samples,
+            'small_sample_size': small_sample_size if create_small_samples else 0
+        }
+
+        if self.config.use_gcs:
+            metadata_file = f"{self.config.output_path}/metadata.json"
+        else:
+            metadata_file = Path(self.config.output_path) / 'metadata.json'
+
+        self.gcs_helper.write_json(metadata, metadata_file)
+
+        logger.info("=" * 60)
+        logger.info("Dataset splitting complete!")
+        logger.info(f"  Train: {len(train_indices):,} records")
+        logger.info(f"  Val: {len(val_indices):,} records")
+        logger.info(f"  Test: {len(test_indices):,} records")
+        if create_small_samples:
+            logger.info(f"  Small samples: {small_sample_size} records each")
+        logger.info("=" * 60)
+
+    def _append_to_split_file(self, split_name: str, records: List[Dict]):
+        """
+        Append records to a split chunk file (for streaming writes)
+
+        Args:
+            split_name: 'train', 'val', or 'test'
+            records: Records to append
+        """
+        import time
+        import random
+
+        # Generate chunk filename with timestamp and random suffix
+        timestamp = int(time.time())
+        rand_suffix = random.randint(1000, 9999)
+        chunk_filename = f"{split_name}_chunk_{timestamp}_{rand_suffix}.pt"
+
+        if self.config.use_gcs:
+            chunk_path = f"{self.config.output_path}/{chunk_filename}"
+        else:
+            output_dir = Path(self.config.output_path)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            chunk_path = output_dir / chunk_filename
+
+        self.gcs_helper.write_torch(records, chunk_path)
+
+    def _combine_split_chunks(self, split_name: str):
+        """
+        Combine all chunk files for a split into a single final file
+
+        Args:
+            split_name: 'train', 'val', or 'test'
+        """
+        import gc
+
+        logger.info(f"Combining {split_name} chunks...")
+
+        # Find all chunk files
+        if self.config.use_gcs:
+            from google.cloud import storage
+            prefix = f"{self.config.output_path}/{split_name}_chunk_"
+
+            client = storage.Client(project=self.config.gcs_project_id)
+            bucket = client.bucket(self.config.gcs_bucket)
+            chunk_blobs = list(bucket.list_blobs(prefix=prefix))
+            chunk_blobs.sort(key=lambda b: b.name)
+        else:
+            output_dir = Path(self.config.output_path)
+            chunk_files = sorted(output_dir.glob(f"{split_name}_chunk_*.pt"))
+
+        # Load and combine all chunks
+        all_records = []
+
+        if self.config.use_gcs:
+            for blob in tqdm(chunk_blobs, desc=f"Loading {split_name} chunks"):
+                records = self.gcs_helper.read_torch(blob.name)
+                all_records.extend(records)
+                del records
+                gc.collect()
+
+            # Delete chunk files after combining
+            for blob in chunk_blobs:
+                blob.delete()
+        else:
+            for chunk_file in tqdm(chunk_files, desc=f"Loading {split_name} chunks"):
+                records = self.gcs_helper.read_torch(str(chunk_file))
+                all_records.extend(records)
+                del records
+                gc.collect()
+
+            # Delete chunk files after combining
+            for chunk_file in chunk_files:
+                chunk_file.unlink()
+
+        # Save final combined file
+        if self.config.use_gcs:
+            output_file = f"{self.config.output_path}/{split_name}_data.pkl"
+        else:
+            output_file = Path(self.config.output_path) / f"{split_name}_data.pkl"
+
+        self.gcs_helper.write_pickle(all_records, output_file)
+        logger.info(f"Saved {split_name} split with {len(all_records):,} records")
+
+        del all_records
+        gc.collect()
+
+    def _save_small_sample(self, split_name: str, records: List[Dict]):
+        """
+        Save small sample version of a split
+
+        Args:
+            split_name: 'train', 'val', or 'test'
+            records: Sample records
+        """
+        if not records:
+            logger.warning(f"No records for {split_name}_small")
+            return
+
+        if self.config.use_gcs:
+            output_file = f"{self.config.output_path}/{split_name}_small.pkl"
+        else:
+            output_file = Path(self.config.output_path) / f"{split_name}_small.pkl"
+
+        self.gcs_helper.write_pickle(records, output_file)
+        logger.info(f"Saved {split_name}_small with {len(records)} records")
+
     def create_splits(self, records: List[Dict]):
         """Create train/val/test splits and save"""
         n_total = len(records)
@@ -1377,6 +1785,25 @@ def main():
         help='Number of parallel workers for image downloading (default: 4)'
     )
 
+    parser.add_argument(
+        '--skip-to-combine',
+        action='store_true',
+        help='Skip batch processing and go directly to combining intermediate batches into final splits'
+    )
+
+    parser.add_argument(
+        '--create-small-samples',
+        action='store_true',
+        help='Create small sample versions of train/val/test for testing purposes (e.g., train_small.pkl)'
+    )
+
+    parser.add_argument(
+        '--small-sample-size',
+        type=int,
+        default=100,
+        help='Number of records in small sample datasets (default: 100)'
+    )
+
     # Data splits
     parser.add_argument(
         '--train-split',
@@ -1453,10 +1880,22 @@ def main():
 
     # Create dataset
     dataset_creator = DatasetCreator(config)
-    dataset_creator.create_dataset(
-        batch_size=args.batch_size,
-        num_workers=args.num_workers
-    )
+
+    if args.skip_to_combine:
+        # Skip batch processing, go directly to combining and splitting
+        logger.info("Skipping batch processing, combining intermediate batches directly...")
+        dataset_creator.create_splits_from_batches_streaming(
+            create_small_samples=args.create_small_samples,
+            small_sample_size=args.small_sample_size
+        )
+    else:
+        # Full pipeline: batch processing + combining + splitting
+        dataset_creator.create_dataset(
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            create_small_samples=args.create_small_samples,
+            small_sample_size=args.small_sample_size
+        )
 
     logger.info("=" * 60)
     logger.info("Processing complete!")

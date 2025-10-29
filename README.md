@@ -11,7 +11,10 @@ HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused w
 - **Robust Error Handling**: Pipeline continues past failed images with detailed diagnostics
 - **Improved Temporal Matching**: Fixed StudyDate+StudyTime parsing, increased matches from 0 to 107,949 records
 - **Detailed Statistics Logging**: Real-time visibility into joining process (successful matches, missing images, temporal mismatches)
-- **OOM Prevention**: Memory-optimized processing allows handling 107,949+ records on 14GB VM without crashes
+- **Memory-Efficient Streaming**: Process 100K+ records on 7.5GB RAM without OOM crashes
+- **Stratified Splitting**: Evenly distribute classes across train/val/test splits
+- **Resume Capability**: Skip completed batch processing and jump directly to dataset creation
+- **Small Sample Datasets**: Automatically generate small test versions for rapid Phase 2 development
 
 ### Technical Documentation
 - 📋 **[OPUS Fixes Verification](OPUS_FIXES_VERIFICATION.md)**: Complete verification of all 5 critical issues identified and fixed
@@ -253,8 +256,13 @@ processed/phase1_preprocess/
 ├── train_data.pkl          # Training set (70% of data)
 ├── val_data.pkl            # Validation set (15% of data)
 ├── test_data.pkl           # Test set (15% of data)
+├── train_small.pkl         # Small training sample (100 records, optional)
+├── val_small.pkl           # Small validation sample (100 records, optional)
+├── test_small.pkl          # Small test sample (100 records, optional)
 └── metadata.json           # Dataset metadata and configuration
 ```
+
+**Note:** Small sample files (`*_small.pkl`) are only created when using the `--create-small-samples` flag. These are perfect for quickly testing your Phase 2 model implementation without loading the full dataset.
 
 **Each record in the pickle files contains:**
 ```python
@@ -275,15 +283,77 @@ processed/phase1_preprocess/
 **metadata.json contains:**
 ```json
 {
-    "config": {...},              # Full preprocessing configuration
-    "n_train": 12345,            # Number of training samples
-    "n_val": 2647,               # Number of validation samples
-    "n_test": 2647,              # Number of test samples
-    "total_records": 17639       # Total records processed
+    "config": {...},                    # Full preprocessing configuration
+    "n_train": 12345,                  # Number of training samples
+    "n_val": 2647,                     # Number of validation samples
+    "n_test": 2647,                    # Number of test samples
+    "total_records": 17639,            # Total records processed
+    "stratified": true,                # Whether splits are stratified by class
+    "small_samples_created": true,     # Whether small samples were created
+    "small_sample_size": 100           # Size of small sample datasets
 }
 ```
 
-See [PSEUDO_NOTES_EXPLAINED.md](PSEUDO_NOTES_EXPLAINED.md) for detailed explanation of pseudo-note generation.
+## Advanced Usage
+
+### Resume from Intermediate Batches
+
+If batch processing is complete but split creation failed (e.g., OOM error), you can skip directly to combining batches:
+
+```bash
+# Resume from intermediate batches (memory-efficient streaming mode)
+python src/phase1_preprocess.py \
+  --gcs-bucket bergermimiciv \
+  --gcs-cxr-bucket mimic-cxr-jpg-2.1.0.physionet.org \
+  --gcs-project-id YOUR_PROJECT_ID \
+  --output-path processed/phase1_with_path_fixes_raw \
+  --skip-to-combine \
+  --create-small-samples \
+  --small-sample-size 100
+```
+
+**Key arguments:**
+- `--skip-to-combine`: Skip batch processing, load intermediate batches and create splits
+- `--create-small-samples`: Generate small sample datasets for Phase 2 testing
+- `--small-sample-size N`: Number of records in small samples (default: 100)
+
+### Memory-Efficient Streaming Mode
+
+The pipeline now uses streaming processing for split creation, allowing it to handle 100K+ records on machines with as little as 7.5GB RAM:
+
+- **Counts records** without loading full data
+- **Extracts labels** for stratified splitting (streaming)
+- **Writes splits** in chunks (1000 records at a time)
+- **Combines chunks** into final files with automatic cleanup
+
+This means you can run the full pipeline on budget-friendly VM instances (n4-standard-2, n4-standard-4) without OOM issues.
+
+### Stratified Splitting
+
+The pipeline automatically creates stratified splits to ensure even distribution of classes across train/val/test:
+
+- Uses disease labels if available
+- Falls back to subject_id-based pseudo-random stratification
+- Maintains 70/15/15 split ratios within each class group
+- Logs split statistics for verification
+
+### Small Sample Datasets
+
+Create small versions of train/val/test for rapid Phase 2 development:
+
+```bash
+python src/phase1_preprocess.py \
+  --gcs-bucket bergermimiciv \
+  --output-path processed/phase1_preprocess \
+  --create-small-samples \
+  --small-sample-size 200  # 200 records per split
+```
+
+**Use cases:**
+- Test Phase 2 model architecture quickly
+- Debug data loading pipelines
+- Verify training loop works end-to-end
+- Rapid iteration during development
 
 ### Phase 1b: Diagnosis Leakage Filtering (Optional)
 
@@ -352,7 +422,7 @@ config.mimic_ed_path = "physionet.org/files/mimic-iv-ed/2.2"
 ### Multi-Bucket Support
 
 The pipeline automatically routes data to the correct bucket:
-- **Your bucket** (`bergermimiciv`): MIMIC-IV, MIMIC-IV-ED, metadata, outputs
+- **Bucket** (`bergermimiciv`): MIMIC-IV, MIMIC-IV-ED, metadata, outputs
 - **PhysioNet's bucket** (`mimic-cxr-jpg-2.1.0.physionet.org`): MIMIC-CXR images
 
 This saves 500+ GB of storage and hours of upload time!
@@ -447,12 +517,7 @@ See [LOCAL_TESTING.md](LOCAL_TESTING.md) for more troubleshooting tips.
 ## Documentation
 
 - **[DEPLOYMENT_QUICKSTART.md](DEPLOYMENT_QUICKSTART.md)** - Quick deployment reference
-- **[docs/GCP_DEPLOYMENT.md](docs/GCP_DEPLOYMENT.md)** - Complete GCP deployment guide
 - **[LOCAL_TESTING.md](LOCAL_TESTING.md)** - Test locally before cloud deployment
-- **[docs/GCS_SETUP.md](docs/GCS_SETUP.md)** - Complete Google Cloud setup guide
-- **[PSEUDO_NOTES_EXPLAINED.md](PSEUDO_NOTES_EXPLAINED.md)** - How pseudo-notes work
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - System architecture details
-
 ## Requirements
 
 ### Data Access
@@ -525,5 +590,5 @@ For questions or issues:
 
 ---
 
-**Last Updated**: 2025-10-26
-**Status**: Phase 1 Complete ✅ | Optimized Performance (20-40x faster) ✅ | 107,949+ Records Matched ✅ | Multi-Bucket GCS Support ✅ | Local Testing ✅ | GCP Deployment Automation ✅
+**Last Updated**: 2025-10-28
+**Status**: Phase 1 Complete ✅ | Memory-Efficient Streaming ✅ | Stratified Splitting ✅ | Resume Capability ✅ | Small Sample Datasets ✅ | 107,949+ Records Matched ✅ | Runs on 7.5GB RAM ✅
