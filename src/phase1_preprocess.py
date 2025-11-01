@@ -1269,18 +1269,17 @@ class DatasetCreator:
         logger.info(f"Total records across all batches: {total_count}")
         return total_count
 
-    def extract_labels_for_stratification(self, batch_files: List) -> Tuple[List[str], List[int]]:
+    def extract_labels_for_stratification(self, batch_files: List) -> List[int]:
         """
-        Extract subject_ids and a stratification key from all batches
-        Uses first available class label or defaults to random assignment
+        Extract stratification keys from all batches
+        Uses first available class label or defaults to subject_id-based distribution
 
         Args:
             batch_files: List of batch file references
 
         Returns:
-            Tuple of (record_identifiers, stratification_keys) for all records
+            List of stratification_keys for all records (one per record)
         """
-        record_ids = []
         strat_keys = []
 
         logger.info("Extracting labels for stratified splitting...")
@@ -1293,12 +1292,8 @@ class DatasetCreator:
                 else:
                     records = self.gcs_helper.read_torch(str(batch_file))
 
-                # Extract identifiers and stratification keys
+                # Extract stratification keys (no need to store record_ids - just count)
                 for record in records:
-                    # Use subject_id + study_id as unique identifier
-                    record_id = f"{record['subject_id']}_{record['study_id']}"
-                    record_ids.append(record_id)
-
                     # Extract stratification key
                     # Try to use disease labels if available, otherwise use subject_id mod 10 for distribution
                     labels = record.get('labels', {})
@@ -1317,8 +1312,8 @@ class DatasetCreator:
             except Exception as e:
                 logger.error(f"Error extracting labels from {batch_file}: {e}")
 
-        logger.info(f"Extracted {len(record_ids)} record identifiers for stratification")
-        return record_ids, strat_keys
+        logger.info(f"Extracted {len(strat_keys)} stratification keys for splitting")
+        return strat_keys
 
     def create_stratified_split_indices(self, strat_keys: List[int],
                                        total_count: int) -> Tuple[set, set, set]:
@@ -1393,12 +1388,17 @@ class DatasetCreator:
             return
 
         # Step 3: Extract labels for stratification
-        record_ids, strat_keys = self.extract_labels_for_stratification(batch_files)
+        strat_keys = self.extract_labels_for_stratification(batch_files)
+        logger.info(f"Memory-efficient extraction complete. Creating split indices...")
 
         # Step 4: Create stratified split indices
         train_indices, val_indices, test_indices = self.create_stratified_split_indices(
             strat_keys, total_count
         )
+
+        # Free strat_keys after creating indices
+        del strat_keys
+        gc.collect()
 
         # Step 5: Stream through batches and write to split files
         logger.info("Streaming records to split files...")
@@ -1414,7 +1414,10 @@ class DatasetCreator:
         test_small = []
 
         current_idx = 0
-        write_batch_size = 1000  # Write every 1000 records to avoid memory buildup
+        # Write batch size: smaller for low-memory machines
+        # Each record is ~6-8 MB, and we have 3 accumulators (train/val/test)
+        # 25 records × 6 MB × 3 = ~450 MB - safe for 7.5GB RAM machines
+        write_batch_size = 25
 
         for batch_file in tqdm(batch_files, desc="Writing splits"):
             try:
