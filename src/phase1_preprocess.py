@@ -1252,14 +1252,12 @@ class DatasetCreator:
         Returns:
             Tuple of (total_count, stratification_keys)
         """
-        import gc
-
         total_count = 0
         strat_keys = []
 
         logger.info("Counting records and extracting labels in one pass...")
 
-        for idx, batch_file in enumerate(tqdm(batch_files, desc="Counting & extracting")):
+        for batch_file in tqdm(batch_files, desc="Counting & extracting"):
             try:
                 # Load batch
                 if self.config.use_gcs:
@@ -1283,11 +1281,6 @@ class DatasetCreator:
                     strat_keys.append(strat_key)
 
                 del records  # Free memory immediately
-
-                # Force garbage collection every 100 batches to prevent memory buildup
-                if idx % 100 == 0:
-                    gc.collect()
-
             except Exception as e:
                 logger.error(f"Error processing {batch_file}: {e}")
 
