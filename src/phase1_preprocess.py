@@ -232,11 +232,11 @@ class GCSHelper:
 
             # Clean up temp file
             Path(tmp_path).unlink()
-            logger.info(f"Saved to GCS using torch.save: gs://{self.output_bucket.name}/{gcs_key}")
+            logger.debug(f"Saved to GCS using torch.save: gs://{self.output_bucket.name}/{gcs_key}")
         else:
             # Save locally using torch.save
             torch.save(data, path)
-            logger.info(f"Saved locally using torch.save: {path}")
+            logger.debug(f"Saved locally using torch.save: {path}")
 
     def read_torch(self, path):
         """
@@ -267,14 +267,14 @@ class GCSHelper:
 
             # Clean up temp file
             Path(tmp_path).unlink()
-            logger.info(f"Loaded from GCS using torch.load: gs://{self.output_bucket.name}/{gcs_key}")
+            logger.debug(f"Loaded from GCS using torch.load: gs://{self.output_bucket.name}/{gcs_key}")
             return data
         else:
             # Load locally using torch.load
             # Use weights_only=False to allow loading numpy arrays and custom objects
             # This is safe since we trust our own checkpoint files
             data = torch.load(path, map_location='cpu', weights_only=False)
-            logger.info(f"Loaded locally using torch.load: {path}")
+            logger.debug(f"Loaded locally using torch.load: {path}")
             return data
 
     def write_json(self, data, path):
