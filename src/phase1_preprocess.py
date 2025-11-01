@@ -1414,10 +1414,10 @@ class DatasetCreator:
         test_small = []
 
         current_idx = 0
-        # Write batch size: smaller for low-memory machines
+        # Write batch size: optimized for low-memory machines
         # Each record is ~6-8 MB, and we have 3 accumulators (train/val/test)
-        # 25 records × 6 MB × 3 = ~450 MB - safe for 7.5GB RAM machines
-        write_batch_size = 25
+        # 100 records × 6 MB × 3 = ~1.8 GB - safe for 7.5GB RAM machines
+        write_batch_size = 100
 
         for batch_file in tqdm(batch_files, desc="Writing splits"):
             try:
