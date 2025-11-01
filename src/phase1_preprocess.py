@@ -1240,9 +1240,59 @@ class DatasetCreator:
 
         return batch_files
 
+    def count_and_extract_streaming(self, batch_files: List) -> Tuple[int, List[int]]:
+        """
+        Count records AND extract stratification keys in ONE pass (optimization)
+
+        This saves a full iteration through all batches (~30-50% time savings)
+
+        Args:
+            batch_files: List of batch file references
+
+        Returns:
+            Tuple of (total_count, stratification_keys)
+        """
+        total_count = 0
+        strat_keys = []
+
+        logger.info("Counting records and extracting labels in one pass...")
+
+        for batch_file in tqdm(batch_files, desc="Counting & extracting"):
+            try:
+                # Load batch
+                if self.config.use_gcs:
+                    records = self.gcs_helper.read_torch(batch_file.name)
+                else:
+                    records = self.gcs_helper.read_torch(str(batch_file))
+
+                # Count and extract in one loop
+                total_count += len(records)
+
+                for record in records:
+                    # Extract stratification key
+                    labels = record.get('labels', {})
+                    disease_labels = labels.get('disease_labels', [])
+
+                    if disease_labels and len(disease_labels) > 0:
+                        strat_key = hash(str(disease_labels[0])) % 10
+                    else:
+                        strat_key = record['subject_id'] % 10
+
+                    strat_keys.append(strat_key)
+
+                del records  # Free memory immediately
+            except Exception as e:
+                logger.error(f"Error processing {batch_file}: {e}")
+
+        logger.info(f"Total: {total_count} records, {len(strat_keys)} stratification keys")
+        return total_count, strat_keys
+
     def count_total_records_streaming(self, batch_files: List) -> int:
         """
         Count total records across all batches without loading full data
+
+        NOTE: This method is kept for backward compatibility but is slower.
+        Use count_and_extract_streaming() instead to combine counting and extraction.
 
         Args:
             batch_files: List of batch file references
@@ -1380,16 +1430,14 @@ class DatasetCreator:
             logger.error("No intermediate batch files found!")
             return
 
-        # Step 2: Count total records
-        total_count = self.count_total_records_streaming(batch_files)
+        # Step 2 & 3 Combined: Count records and extract labels in one pass (faster!)
+        total_count, strat_keys = self.count_and_extract_streaming(batch_files)
 
         if total_count == 0:
             logger.error("No records found in intermediate batches!")
             return
 
-        # Step 3: Extract labels for stratification
-        strat_keys = self.extract_labels_for_stratification(batch_files)
-        logger.info(f"Memory-efficient extraction complete. Creating split indices...")
+        logger.info(f"Counted {total_count} records and extracted stratification keys in one pass")
 
         # Step 4: Create stratified split indices
         train_indices, val_indices, test_indices = self.create_stratified_split_indices(
