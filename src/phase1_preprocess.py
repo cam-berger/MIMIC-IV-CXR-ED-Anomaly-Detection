@@ -1741,7 +1741,8 @@ class DatasetCreator:
             Number of chunk files found
         """
         if self.config.use_gcs:
-            bucket = self.gcs_helper.storage_client.bucket(self.config.output_gcs_bucket)
+            # Use output_bucket directly
+            bucket = self.gcs_helper.output_bucket
             blobs = list(bucket.list_blobs(prefix=self.config.output_path))
             chunk_blobs = [b for b in blobs if b.name.endswith('.pt') and f'{split_name}_chunk_' in b.name]
             return len(chunk_blobs)
