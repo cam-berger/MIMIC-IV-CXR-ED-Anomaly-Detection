@@ -1424,7 +1424,8 @@ class DatasetCreator:
 
     def create_splits_from_batches_streaming(self, create_small_samples: bool = False,
                                              small_sample_size: int = 100,
-                                             max_batches: Optional[int] = None):
+                                             max_batches: Optional[int] = None,
+                                             skip_final_combine: bool = False):
         """
         Create train/val/test splits by streaming through batches (memory-efficient)
         Implements stratified splitting to evenly distribute classes
@@ -1433,6 +1434,7 @@ class DatasetCreator:
             create_small_samples: Whether to create small sample versions
             small_sample_size: Number of records in small samples
             max_batches: Optional limit on number of batches to process (for testing)
+            skip_final_combine: If True, keep data as separate chunks instead of combining into single files
         """
         import gc
 
@@ -1542,10 +1544,24 @@ class DatasetCreator:
             self._append_to_split_file('test', test_records)
 
         # Combine all split chunks into final files
-        logger.info("Combining split chunks into final files...")
-        self._combine_split_chunks('train')
-        self._combine_split_chunks('val')
-        self._combine_split_chunks('test')
+        # Optionally combine chunks into single files (or keep as chunks for large datasets)
+        if skip_final_combine:
+            logger.info("=" * 60)
+            logger.info("Skipping final combine step - keeping data as separate chunks")
+            logger.info("This is recommended for large datasets (>1TB)")
+            logger.info("=" * 60)
+            # Count chunk files for metadata
+            train_chunks = self._count_chunk_files('train')
+            val_chunks = self._count_chunk_files('val')
+            test_chunks = self._count_chunk_files('test')
+            logger.info(f"Train chunks: {train_chunks}")
+            logger.info(f"Val chunks: {val_chunks}")
+            logger.info(f"Test chunks: {test_chunks}")
+        else:
+            logger.info("Combining split chunks into final files...")
+            self._combine_split_chunks('train')
+            self._combine_split_chunks('val')
+            self._combine_split_chunks('test')
 
         # Create small samples if requested
         if create_small_samples:
@@ -1563,8 +1579,16 @@ class DatasetCreator:
             'total_records': total_count,
             'stratified': True,
             'small_samples_created': create_small_samples,
-            'small_sample_size': small_sample_size if create_small_samples else 0
+            'small_sample_size': small_sample_size if create_small_samples else 0,
+            'chunked_format': skip_final_combine,
+            'data_format': 'chunked' if skip_final_combine else 'combined'
         }
+
+        # Add chunk counts if using chunked format
+        if skip_final_combine:
+            metadata['n_train_chunks'] = train_chunks
+            metadata['n_val_chunks'] = val_chunks
+            metadata['n_test_chunks'] = test_chunks
 
         if self.config.use_gcs:
             metadata_file = f"{self.config.output_path}/metadata.json"
@@ -1578,6 +1602,10 @@ class DatasetCreator:
         logger.info(f"  Train: {len(train_indices):,} records")
         logger.info(f"  Val: {len(val_indices):,} records")
         logger.info(f"  Test: {len(test_indices):,} records")
+        if skip_final_combine:
+            logger.info(f"  Format: CHUNKED (train: {train_chunks} chunks, val: {val_chunks} chunks, test: {test_chunks} chunks)")
+        else:
+            logger.info("  Format: COMBINED (single files for train/val/test)")
         if create_small_samples:
             logger.info(f"  Small samples: {small_sample_size} records each")
         logger.info("=" * 60)
@@ -1701,6 +1729,28 @@ class DatasetCreator:
         logger.info(f"Completed {split_name} split with {total_count:,} records")
         del all_records
         gc.collect()
+
+    def _count_chunk_files(self, split_name: str) -> int:
+        """
+        Count the number of chunk files for a given split.
+
+        Args:
+            split_name: 'train', 'val', or 'test'
+
+        Returns:
+            Number of chunk files found
+        """
+        if self.config.use_gcs:
+            bucket = self.gcs_helper.storage_client.bucket(self.config.output_gcs_bucket)
+            blobs = list(bucket.list_blobs(prefix=self.config.output_path))
+            chunk_blobs = [b for b in blobs if b.name.endswith('.pt') and f'{split_name}_chunk_' in b.name]
+            return len(chunk_blobs)
+        else:
+            output_dir = Path(self.config.output_path)
+            if not output_dir.exists():
+                return 0
+            chunk_files = list(output_dir.glob(f'{split_name}_chunk_*.pt'))
+            return len(chunk_files)
 
     def _save_small_sample(self, split_name: str, records: List[Dict]):
         """
@@ -1916,6 +1966,12 @@ def main():
         help='Maximum number of intermediate batches to process (for testing). None = process all batches'
     )
 
+    parser.add_argument(
+        '--skip-final-combine',
+        action='store_true',
+        help='Skip combining chunk files into single train/val/test files. Keep data as separate chunks (recommended for large datasets >1TB)'
+    )
+
     # Data splits
     parser.add_argument(
         '--train-split',
@@ -1999,7 +2055,8 @@ def main():
         dataset_creator.create_splits_from_batches_streaming(
             create_small_samples=args.create_small_samples,
             small_sample_size=args.small_sample_size,
-            max_batches=args.max_batches
+            max_batches=args.max_batches,
+            skip_final_combine=args.skip_final_combine
         )
     else:
         # Full pipeline: batch processing + combining + splitting

@@ -104,6 +104,7 @@ fi
 # Build command with conditional max-batches parameter
 PIPELINE_CMD="python src/phase1_preprocess.py \
     --skip-to-combine \
+    --skip-final-combine \
     --gcs-bucket $BUCKET_NAME \
     --gcs-cxr-bucket mimic-cxr-jpg-2.1.0.physionet.org \
     --gcs-project-id $PROJECT_ID \
