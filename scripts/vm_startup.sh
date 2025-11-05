@@ -12,6 +12,8 @@ set -e  # Exit on error
 PROJECT_ID=$(curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/project-id)
 BUCKET_NAME=$(curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/bucket-name)
 GIT_REPO=$(curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/git-repo)
+MAX_BATCHES=$(curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/max-batches 2>/dev/null || echo "")
+OUTPUT_PATH=$(curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/output-path 2>/dev/null || echo "processed/phase1_final")
 
 # Logging
 LOG_FILE="/var/log/mimic-preprocessing.log"
@@ -24,6 +26,12 @@ echo "========================================"
 echo "Time: $(date)"
 echo "Project: $PROJECT_ID"
 echo "Bucket: $BUCKET_NAME"
+if [ -n "$MAX_BATCHES" ] && [ "$MAX_BATCHES" != "" ]; then
+    echo "Mode: TEST (max $MAX_BATCHES batches)"
+else
+    echo "Mode: FULL PRODUCTION"
+fi
+echo "Output Path: $OUTPUT_PATH"
 echo "========================================"
 
 # Update system
@@ -84,28 +92,50 @@ echo "[6/8] Setting up GCP authentication..."
 gcloud config set project "$PROJECT_ID"
 
 # Run preprocessing pipeline
-echo "[7/8] Running full preprocessing pipeline..."
-echo "This may take several hours..."
+echo "[7/8] Running preprocessing pipeline..."
+if [ -n "$MAX_BATCHES" ] && [ "$MAX_BATCHES" != "" ]; then
+    echo "TEST MODE: Processing only $MAX_BATCHES batches"
+    echo "This should take 10-30 minutes..."
+else
+    echo "FULL PRODUCTION MODE: Processing all batches"
+    echo "This may take several days..."
+fi
 
-python src/run_full_pipeline.py \
-    --gcs-bucket "$BUCKET_NAME" \
+# Build command with conditional max-batches parameter
+PIPELINE_CMD="python src/phase1_preprocess.py \
+    --skip-to-combine \
+    --gcs-bucket $BUCKET_NAME \
     --gcs-cxr-bucket mimic-cxr-jpg-2.1.0.physionet.org \
-    --gcs-project-id "$PROJECT_ID" \
+    --gcs-project-id $PROJECT_ID \
     --mimic-iv-path physionet.org/files/mimiciv/3.1 \
     --mimic-ed-path physionet.org/files/mimic-iv-ed/2.2 \
-    --output-path processed/phase1_final \
-    --aggressive-filtering \
-    --image-size 518 \
-    --max-text-length 8192
+    --output-path $OUTPUT_PATH \
+    --create-small-samples \
+    --small-sample-size 100"
 
+# Add max-batches if in test mode
+if [ -n "$MAX_BATCHES" ] && [ "$MAX_BATCHES" != "" ]; then
+    PIPELINE_CMD="$PIPELINE_CMD --max-batches $MAX_BATCHES"
+fi
+
+# Execute pipeline
+eval $PIPELINE_CMD
 PIPELINE_STATUS=$?
 
 if [ $PIPELINE_STATUS -eq 0 ]; then
     echo "========================================"
     echo "PIPELINE COMPLETED SUCCESSFULLY!"
     echo "========================================"
-    echo "Output location: gs://$BUCKET_NAME/processed/phase1_final/"
+    echo "Output location: gs://$BUCKET_NAME/$OUTPUT_PATH/"
     echo "Time: $(date)"
+
+    if [ -n "$MAX_BATCHES" ] && [ "$MAX_BATCHES" != "" ]; then
+        echo ""
+        echo "TEST COMPLETED! Next steps:"
+        echo "  1. Verify output: gsutil ls gs://$BUCKET_NAME/$OUTPUT_PATH/"
+        echo "  2. Check metadata: gsutil cat gs://$BUCKET_NAME/$OUTPUT_PATH/metadata.json"
+        echo "  3. If successful, run full pipeline without --max-batches"
+    fi
 
     # Upload logs to GCS
     gsutil cp "$LOG_FILE" "gs://$BUCKET_NAME/logs/preprocessing-$(date +%Y%m%d-%H%M%S).log"

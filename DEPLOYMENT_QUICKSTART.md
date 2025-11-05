@@ -59,10 +59,36 @@ gcloud compute instances delete mimic-preprocessing-YYYYMMDD-HHMMSS \
 
 ### Option A: Fully Automated Deployment
 
+#### Option A1: Test Mode (RECOMMENDED FIRST)
+
+Test with only 10 batches before running the full pipeline:
+
 ```bash
 # Navigate to project directory
 cd ~/Documents/Portfolio/MIMIC/MIMIC-IV-CXR-ED-Anomaly-Detection
 
+# Run deployment script in TEST MODE (10 batches only)
+bash scripts/deploy_gcp.sh mimic-cxr-pred bergermimiciv test
+```
+
+**What happens:**
+1. ✅ Creates VM with 4 vCPUs, 15GB RAM
+2. ✅ Uploads startup script
+3. ✅ VM automatically installs dependencies
+4. ✅ VM clones code from GitHub
+5. ✅ VM runs pipeline with **only 10 batches** (test mode)
+6. ✅ VM auto-shuts down when complete
+
+**Benefits:**
+- Completes in 10-30 minutes (vs 2-4 days)
+- Costs <$1 (vs $18-20)
+- Validates configuration before full run
+
+#### Option A2: Full Production Run
+
+After test succeeds, run full pipeline:
+
+```bash
 # Run deployment script (creates VM, installs everything, auto-runs pipeline)
 bash scripts/deploy_gcp.sh mimic-cxr-pred bergermimiciv
 ```
@@ -72,7 +98,7 @@ bash scripts/deploy_gcp.sh mimic-cxr-pred bergermimiciv
 2. ✅ Uploads startup script
 3. ✅ VM automatically installs dependencies
 4. ✅ VM clones code from GitHub
-5. ✅ VM runs full pipeline automatically
+5. ✅ VM runs **full pipeline** (all 4000+ batches)
 6. ✅ VM auto-shuts down when complete
 
 **Monitor the deployment:**
@@ -182,6 +208,104 @@ Output Path: gs://bergermimiciv/processed/phase1_final
 PHASE 1: DATA PREPROCESSING
 ================================================================================
 ...
+```
+
+---
+
+## Step 3.5: Test with Subset First (HIGHLY RECOMMENDED)
+
+Before running the full pipeline (which takes 2-4 days and costs ~$18), test with a small subset of batches to verify everything works correctly.
+
+### Why Test First?
+
+- ✅ Catches configuration errors early
+- ✅ Validates memory usage and performance
+- ✅ Confirms output format is correct
+- ✅ Takes only 10-30 minutes instead of days
+- ✅ Costs < $1 instead of $18-20
+
+### Run Test with 10 Batches
+
+After completing steps 1-3, before running the full pipeline:
+
+```bash
+# On the VM (after SSH'ing in and activating conda environment)
+cd ~/MIMIC-IV-CXR-ED-Anomaly-Detection
+
+# Test: Process only first 10 batches (instead of all 4000+)
+python src/phase1_preprocess.py \
+  --skip-to-combine \
+  --max-batches 10 \
+  --gcs-bucket bergermimiciv \
+  --gcs-cxr-bucket mimic-cxr-jpg-2.1.0.physionet.org \
+  --gcs-project-id mimic-cxr-pred \
+  --mimic-iv-path physionet.org/files/mimiciv/3.1 \
+  --mimic-ed-path physionet.org/files/mimic-iv-ed/2.2 \
+  --output-path processed/phase1_test \
+  --create-small-samples \
+  --small-sample-size 100
+```
+
+**Expected output:**
+```
+============================================================
+Creating stratified train/val/test splits (streaming mode)
+Testing mode: Processing only first 10 batches
+============================================================
+Found 4237 intermediate batch files in GCS
+Limited to first 10 batch files (max_batches=10)
+Counting records and extracting labels in one pass...
+Total: 500 records, 500 stratification keys
+Creating stratified split indices...
+Split sizes: train=350, val=75, test=75
+Streaming records to split files...
+Combining train chunks...
+Combining val chunks...
+Combining test chunks...
+Dataset splitting complete!
+```
+
+### Verify Test Output
+
+```bash
+# Check output files were created
+gsutil ls gs://bergermimiciv/processed/phase1_test/
+
+# Expected files:
+# train_data.pt
+# val_data.pt
+# test_data.pt
+# metadata.json
+
+# Check record counts
+gsutil cat gs://bergermimiciv/processed/phase1_test/metadata.json
+
+# Expected JSON:
+# {
+#   "n_train": 350,
+#   "n_val": 75,
+#   "n_test": 75,
+#   "total_records": 500,
+#   "stratified": true
+# }
+```
+
+### Test Passed? Run Full Pipeline
+
+If the test completes successfully, run the full pipeline:
+
+```bash
+# Run full pipeline (all 4000+ batches)
+python src/phase1_preprocess.py \
+  --skip-to-combine \
+  --gcs-bucket bergermimiciv \
+  --gcs-cxr-bucket mimic-cxr-jpg-2.1.0.physionet.org \
+  --gcs-project-id mimic-cxr-pred \
+  --mimic-iv-path physionet.org/files/mimiciv/3.1 \
+  --mimic-ed-path physionet.org/files/mimic-iv-ed/2.2 \
+  --output-path processed/phase1_final \
+  --create-small-samples \
+  --small-sample-size 100
 ```
 
 ---
@@ -313,22 +437,41 @@ journalctl -u google-startup-scripts.service | grep -A 20 "Error"
 
 If you get OOM errors with `n1-standard-4` (15GB RAM):
 
-**Quick fix:** Reduce resource requirements:
+**Understanding Memory Issues:**
+- Steps 1-3 (count, extract, split) are memory-efficient and stream data
+- Step 4 (creating splits) uses ~900MB RAM with `write_batch_size=50`
+- Step 5 (combining chunks) loads chunks in groups to manage memory
+- **Known issue:** With 4000+ batches, step 5 can still OOM on low-RAM machines
+
+**Quick fix #1:** Test with subset first (see Step 3.5):
 
 ```bash
-python src/run_full_pipeline.py \
+# Test with only 10 batches to verify everything works
+python src/phase1_preprocess.py \
+  --skip-to-combine \
+  --max-batches 10 \
   --gcs-bucket bergermimiciv \
   --gcs-cxr-bucket mimic-cxr-jpg-2.1.0.physionet.org \
   --gcs-project-id mimic-cxr-pred \
-  --mimic-iv-path physionet.org/files/mimiciv/3.1 \
-  --mimic-ed-path physionet.org/files/mimic-iv-ed/2.2 \
-  --output-path processed/phase1_final \
-  --aggressive-filtering \
-  --image-size 224 \      # Reduced from 518
-  --max-text-length 512   # Reduced from 8192
+  --output-path processed/phase1_test
 ```
 
-**Better fix:** Request quota increase for larger VM or delete old VMs to use `n1-highmem-8`.
+**Quick fix #2:** Use larger VM for full run:
+
+```bash
+# Create VM with more RAM (n1-highmem-4: 26GB RAM)
+gcloud compute instances create mimic-preprocessing \
+  --machine-type=n1-highmem-4 \
+  --boot-disk-size=200GB \
+  --zone=us-central1-a \
+  --project=mimic-cxr-pred \
+  --scopes=cloud-platform
+```
+
+**Long-term fix:** For datasets with 4000+ batches, consider:
+- Using HDF5/Zarr format instead of combining all chunks
+- Loading data incrementally during training from separate chunk files
+- Using a database format that supports true streaming
 
 ### Authentication Errors
 
@@ -377,7 +520,10 @@ gcloud compute instances delete OLD_VM_NAME \
 ## Quick Reference Commands
 
 ```bash
-# Deploy automated
+# Deploy automated (TEST MODE - 10 batches)
+bash scripts/deploy_gcp.sh mimic-cxr-pred bergermimiciv test
+
+# Deploy automated (FULL PRODUCTION - all batches)
 bash scripts/deploy_gcp.sh mimic-cxr-pred bergermimiciv
 
 # SSH into VM
@@ -386,7 +532,10 @@ gcloud compute ssh mimic-preprocessing --zone=us-central1-a
 # Monitor logs
 tail -f /var/log/mimic-preprocessing.log
 
-# Check output
+# Check output (test)
+gsutil ls gs://bergermimiciv/processed/phase1_test/
+
+# Check output (production)
 gsutil ls gs://bergermimiciv/processed/phase1_final/
 
 # Stop VM

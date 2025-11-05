@@ -1212,9 +1212,12 @@ class DatasetCreator:
         logger.info(f"Loaded {len(all_records)} total records from intermediate batches")
         return all_records
 
-    def get_batch_file_list(self) -> List:
+    def get_batch_file_list(self, max_batches: Optional[int] = None) -> List:
         """
         Get list of all intermediate batch files without loading them
+
+        Args:
+            max_batches: Optional limit on number of batches to return (for testing)
 
         Returns:
             List of batch file references (blobs for GCS, paths for local)
@@ -1231,11 +1234,23 @@ class DatasetCreator:
             # Filter for .pt files only (ignore legacy .pkl)
             batch_files = [blob for blob in blobs if blob.name.endswith('.pt')]
             batch_files.sort(key=lambda b: b.name)
+
+            # Limit to max_batches if specified
+            if max_batches is not None:
+                batch_files = batch_files[:max_batches]
+                logger.info(f"Limited to first {len(batch_files)} batch files (max_batches={max_batches})")
+
             logger.info(f"Found {len(batch_files)} intermediate batch files in GCS")
         else:
             # List all intermediate batch files locally
             output_dir = Path(self.config.output_path)
             batch_files = sorted(output_dir.glob("intermediate_batch_*.pt"))
+
+            # Limit to max_batches if specified
+            if max_batches is not None:
+                batch_files = batch_files[:max_batches]
+                logger.info(f"Limited to first {len(batch_files)} batch files (max_batches={max_batches})")
+
             logger.info(f"Found {len(batch_files)} intermediate batch files locally")
 
         return batch_files
@@ -1408,7 +1423,8 @@ class DatasetCreator:
         return train_indices, val_indices, test_indices
 
     def create_splits_from_batches_streaming(self, create_small_samples: bool = False,
-                                             small_sample_size: int = 100):
+                                             small_sample_size: int = 100,
+                                             max_batches: Optional[int] = None):
         """
         Create train/val/test splits by streaming through batches (memory-efficient)
         Implements stratified splitting to evenly distribute classes
@@ -1416,15 +1432,18 @@ class DatasetCreator:
         Args:
             create_small_samples: Whether to create small sample versions
             small_sample_size: Number of records in small samples
+            max_batches: Optional limit on number of batches to process (for testing)
         """
         import gc
 
         logger.info("=" * 60)
         logger.info("Creating stratified train/val/test splits (streaming mode)")
+        if max_batches:
+            logger.info(f"Testing mode: Processing only first {max_batches} batches")
         logger.info("=" * 60)
 
         # Step 1: Get list of batch files
-        batch_files = self.get_batch_file_list()
+        batch_files = self.get_batch_file_list(max_batches=max_batches)
 
         if not batch_files:
             logger.error("No intermediate batch files found!")
@@ -1464,8 +1483,8 @@ class DatasetCreator:
         current_idx = 0
         # Write batch size: optimized for low-memory machines
         # Each record is ~6-8 MB, and we have 3 accumulators (train/val/test)
-        # 100 records × 6 MB × 3 = ~1.8 GB - safe for 7.5GB RAM machines
-        write_batch_size = 500
+        # 50 records × 6 MB × 3 = ~900 MB - safer for machines with limited RAM
+        write_batch_size = 50
 
         for batch_file in tqdm(batch_files, desc="Writing splits"):
             try:
@@ -1590,7 +1609,10 @@ class DatasetCreator:
 
     def _combine_split_chunks(self, split_name: str):
         """
-        Combine all chunk files for a split into a single final file
+        Combine all chunk files for a split into a single final file.
+
+        IMPORTANT: This loads all data into memory. For very large datasets (>10GB),
+        consider keeping chunks separate or using a database format.
 
         Args:
             split_name: 'train', 'val', or 'test'
@@ -1608,43 +1630,75 @@ class DatasetCreator:
             bucket = client.bucket(self.config.gcs_bucket)
             chunk_blobs = list(bucket.list_blobs(prefix=prefix))
             chunk_blobs.sort(key=lambda b: b.name)
+
+            if not chunk_blobs:
+                logger.warning(f"No {split_name} chunks found to combine")
+                return
+
+            logger.info(f"Found {len(chunk_blobs)} chunks for {split_name}")
         else:
             output_dir = Path(self.config.output_path)
             chunk_files = sorted(output_dir.glob(f"{split_name}_chunk_*.pt"))
 
-        # Load and combine all chunks
+            if not chunk_files:
+                logger.warning(f"No {split_name} chunks found to combine")
+                return
+
+            logger.info(f"Found {len(chunk_files)} chunks for {split_name}")
+
+        # Strategy: Load chunks in groups to manage memory
+        # Process in groups of 10 chunks at a time, then write intermediate results
+        chunk_group_size = 10
         all_records = []
+        total_count = 0
 
         if self.config.use_gcs:
-            for blob in tqdm(chunk_blobs, desc=f"Loading {split_name} chunks"):
-                records = self.gcs_helper.read_torch(blob.name)
-                all_records.extend(records)
-                del records
-                gc.collect()
+            chunk_list = chunk_blobs
+            for i in range(0, len(chunk_list), chunk_group_size):
+                group = chunk_list[i:i + chunk_group_size]
+                logger.info(f"Loading chunk group {i//chunk_group_size + 1}/{(len(chunk_list) + chunk_group_size - 1)//chunk_group_size}")
+
+                for blob in tqdm(group, desc=f"Loading chunks", leave=False):
+                    records = self.gcs_helper.read_torch(blob.name)
+                    all_records.extend(records)
+                    total_count += len(records)
+                    del records
+                    gc.collect()
 
             # Delete chunk files after combining
+            logger.info(f"Deleting {len(chunk_blobs)} chunk files from GCS...")
             for blob in chunk_blobs:
                 blob.delete()
         else:
-            for chunk_file in tqdm(chunk_files, desc=f"Loading {split_name} chunks"):
-                records = self.gcs_helper.read_torch(str(chunk_file))
-                all_records.extend(records)
-                del records
-                gc.collect()
+            chunk_list = chunk_files
+            for i in range(0, len(chunk_list), chunk_group_size):
+                group = chunk_list[i:i + chunk_group_size]
+                logger.info(f"Loading chunk group {i//chunk_group_size + 1}/{(len(chunk_list) + chunk_group_size - 1)//chunk_group_size}")
+
+                for chunk_file in tqdm(group, desc=f"Loading chunks", leave=False):
+                    records = self.gcs_helper.read_torch(str(chunk_file))
+                    all_records.extend(records)
+                    total_count += len(records)
+                    del records
+                    gc.collect()
 
             # Delete chunk files after combining
+            logger.info(f"Deleting {len(chunk_files)} chunk files...")
             for chunk_file in chunk_files:
                 chunk_file.unlink()
 
-        # Save final combined file
+        # Save final combined file using torch.save (more efficient than pickle)
+        logger.info(f"Saving final {split_name} file with {total_count:,} records...")
         if self.config.use_gcs:
-            output_file = f"{self.config.output_path}/{split_name}_data.pkl"
+            output_file = f"{self.config.output_path}/{split_name}_data.pt"
+            self.gcs_helper.write_torch(all_records, output_file)
+            logger.info(f"Uploaded {split_name} split to GCS")
         else:
-            output_file = Path(self.config.output_path) / f"{split_name}_data.pkl"
+            output_file = Path(self.config.output_path) / f"{split_name}_data.pt"
+            self.gcs_helper.write_torch(all_records, str(output_file))
+            logger.info(f"Saved {split_name} split locally")
 
-        self.gcs_helper.write_pickle(all_records, output_file)
-        logger.info(f"Saved {split_name} split with {len(all_records):,} records")
-
+        logger.info(f"Completed {split_name} split with {total_count:,} records")
         del all_records
         gc.collect()
 
@@ -1855,6 +1909,13 @@ def main():
         help='Number of records in small sample datasets (default: 100)'
     )
 
+    parser.add_argument(
+        '--max-batches',
+        type=int,
+        default=None,
+        help='Maximum number of intermediate batches to process (for testing). None = process all batches'
+    )
+
     # Data splits
     parser.add_argument(
         '--train-split',
@@ -1937,7 +1998,8 @@ def main():
         logger.info("Skipping batch processing, combining intermediate batches directly...")
         dataset_creator.create_splits_from_batches_streaming(
             create_small_samples=args.create_small_samples,
-            small_sample_size=args.small_sample_size
+            small_sample_size=args.small_sample_size,
+            max_batches=args.max_batches
         )
     else:
         # Full pipeline: batch processing + combining + splitting
