@@ -39,7 +39,7 @@ import random
 # Google Cloud Storage
 try:
     from google.cloud import storage
-    from google.cloud.storage import retry
+    from google.api_core import retry
     from google.api_core import timeout as api_timeout
     GCS_AVAILABLE = True
 except ImportError:
@@ -142,15 +142,15 @@ class GCSHelper:
                 )
 
             # Configure retry policy for robustness
-            self.retry_policy = retry.Retry(
-                initial=1.0,      # Initial delay between retries
-                maximum=60.0,     # Maximum delay between retries
-                multiplier=2.0,   # Exponential backoff multiplier
-                deadline=300.0,   # Total timeout for the operation
-                predicate=retry.if_exception_type(
-                    Exception,  # Retry on any exception
+            if retry:
+                self.retry_policy = retry.Retry(
+                    initial=1.0,      # Initial delay between retries
+                    maximum=60.0,     # Maximum delay between retries
+                    multiplier=2.0,   # Exponential backoff multiplier
+                    deadline=300.0,   # Total timeout for the operation
                 )
-            )
+            else:
+                self.retry_policy = None
 
             # Initialize your main bucket (MIMIC-IV, MIMIC-IV-ED, etc.)
             if config.gcs_bucket:
@@ -185,7 +185,10 @@ class GCSHelper:
             gcs_key = path if isinstance(path, str) else str(path)
             logger.info(f"  Reading from GCS: gs://{bucket.name}/{gcs_key}")
             blob = bucket.blob(gcs_key)
-            data = blob.download_as_bytes(retry=self.retry_policy)
+            if self.retry_policy:
+                data = blob.download_as_bytes(retry=self.retry_policy)
+            else:
+                data = blob.download_as_bytes()
             return pd.read_csv(BytesIO(data), **kwargs)
         else:
             return pd.read_csv(path, **kwargs)
@@ -196,7 +199,10 @@ class GCSHelper:
             bucket = self._get_bucket_for_path(path)
             gcs_key = path if isinstance(path, str) else str(path)
             blob = bucket.blob(gcs_key)
-            data = blob.download_as_bytes(retry=self.retry_policy)
+            if self.retry_policy:
+                data = blob.download_as_bytes(retry=self.retry_policy)
+            else:
+                data = blob.download_as_bytes()
             return Image.open(BytesIO(data))
         else:
             return Image.open(path)
@@ -207,7 +213,10 @@ class GCSHelper:
             bucket = self._get_bucket_for_path(path)
             gcs_key = path if isinstance(path, str) else str(path)
             blob = bucket.blob(gcs_key)
-            data = blob.download_as_bytes(retry=self.retry_policy)
+            if self.retry_policy:
+                data = blob.download_as_bytes(retry=self.retry_policy)
+            else:
+                data = blob.download_as_bytes()
             img_array = np.frombuffer(data, np.uint8)
             return cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)
         else:
@@ -219,7 +228,10 @@ class GCSHelper:
             bucket = self._get_bucket_for_path(path)
             gcs_key = path if isinstance(path, str) else str(path)
             blob = bucket.blob(gcs_key)
-            return blob.exists(retry=self.retry_policy)
+            if self.retry_policy:
+                return blob.exists(retry=self.retry_policy)
+            else:
+                return blob.exists()
         else:
             return Path(path).exists()
 
@@ -232,7 +244,10 @@ class GCSHelper:
             buffer.seek(0)
             blob = self.output_bucket.blob(gcs_key)
             blob.chunk_size = 8 * 1024 * 1024  # 8MB chunks
-            blob.upload_from_file(buffer, rewind=True, retry=self.retry_policy)
+            if self.retry_policy:
+                blob.upload_from_file(buffer, rewind=True, retry=self.retry_policy)
+            else:
+                blob.upload_from_file(buffer, rewind=True)
             logger.info(f"Saved to GCS: gs://{self.output_bucket.name}/{gcs_key}")
         else:
             with open(path, 'wb') as f:
@@ -261,12 +276,15 @@ class GCSHelper:
             blob = self.output_bucket.blob(gcs_key)
             blob.chunk_size = 8 * 1024 * 1024  # 8MB chunks for multipart upload
             
-            # Upload with retry policy
-            blob.upload_from_filename(
-                tmp_path,
-                retry=self.retry_policy,
-                timeout=300
-            )
+            # Upload with retry policy if available
+            if self.retry_policy:
+                blob.upload_from_filename(
+                    tmp_path,
+                    retry=self.retry_policy,
+                    timeout=300
+                )
+            else:
+                blob.upload_from_filename(tmp_path, timeout=300)
             
             # Clean up temp file
             Path(tmp_path).unlink()
@@ -296,7 +314,10 @@ class GCSHelper:
             
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp_file:
                 tmp_path = tmp_file.name
-                blob.download_to_filename(tmp_path, retry=self.retry_policy)
+                if self.retry_policy:
+                    blob.download_to_filename(tmp_path, retry=self.retry_policy)
+                else:
+                    blob.download_to_filename(tmp_path)
             
             # Load from temp file
             # Use weights_only=False to allow loading numpy arrays and custom objects
@@ -321,7 +342,10 @@ class GCSHelper:
             gcs_key = path if isinstance(path, str) else str(path)
             json_str = json.dumps(data, indent=2, default=str)
             blob = self.output_bucket.blob(gcs_key)
-            blob.upload_from_string(json_str, content_type='application/json', retry=self.retry_policy)
+            if self.retry_policy:
+                blob.upload_from_string(json_str, content_type='application/json', retry=self.retry_policy)
+            else:
+                blob.upload_from_string(json_str, content_type='application/json')
             logger.info(f"Saved to GCS: gs://{self.output_bucket.name}/{gcs_key}")
         else:
             with open(path, 'w') as f:
