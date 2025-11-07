@@ -528,6 +528,62 @@ def load_chunked_dataset(split_name: str, data_dir: str):
 # Or use lazy loading with PyTorch DataLoader for even better memory efficiency
 ```
 
+### Import Errors
+
+**Error: `ImportError: cannot import name 'retry' from 'google.cloud.storage'`**
+
+This has been fixed in the latest version. The pipeline now uses `google.api_core.retry` instead.
+
+If you encounter this error:
+```bash
+# Update to the latest code
+cd ~/MIMIC-IV-CXR-ED-Anomaly-Detection
+git pull origin main
+
+# Ensure dependencies are installed
+pip install --upgrade google-cloud-storage google-api-core
+```
+
+**Error: Missing dependencies**
+
+```bash
+# Install all required packages
+pip install google-cloud-storage google-api-core torch pandas numpy tqdm \
+            transformers sentence-transformers faiss-cpu pillow opencv-python
+```
+
+### Performance Issues
+
+**Pipeline is slow (>1 minute per batch)**
+
+The optimized pipeline should process batches in 2-3 seconds each. If it's slower:
+
+1. **Check network/GCS connection:**
+   ```bash
+   # Test GCS access speed
+   gsutil -m cp gs://bergermimiciv/processed/phase1_with_path_fixes_raw/batch_0000.pt /tmp/test.pt
+   ```
+
+2. **Verify VM is in same region as buckets:**
+   ```bash
+   # Check VM region
+   gcloud compute instances describe YOUR_VM_NAME --zone=us-central1-a | grep zone
+
+   # Check bucket region
+   gsutil ls -L -b gs://bergermimiciv/ | grep location
+   ```
+
+3. **Check for memory/CPU bottlenecks:**
+   ```bash
+   # Monitor resources
+   htop  # or: top
+   ```
+
+**Expected performance:**
+- Batch processing: 2-3 seconds/batch
+- Full pipeline (4000+ batches): 2-3 hours
+- If significantly slower, check network/regional configuration
+
 ### Authentication Errors
 
 ```bash
