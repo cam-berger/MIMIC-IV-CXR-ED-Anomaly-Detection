@@ -932,27 +932,32 @@ class DatasetCreator:
             client = storage.Client(project=self.config.gcs_project_id)
             bucket = client.bucket(self.config.output_gcs_bucket)
             
-            prefix = f"{self.config.output_path}/intermediate_batches/"
+            # Look for batch files in the output path directly
+            prefix = f"{self.config.output_path}/"
             blobs = list(bucket.list_blobs(prefix=prefix))
-            
-            # Filter to .pt files only
-            batch_blobs = [b for b in blobs if b.name.endswith('.pt')]
+
+            # Filter to intermediate_batch_*.pt files only
+            batch_blobs = [b for b in blobs if b.name.endswith('.pt') and 'intermediate_batch_' in b.name]
             batch_blobs.sort(key=lambda b: b.name)
-            
+
             if max_batches:
                 batch_blobs = batch_blobs[:max_batches]
-            
-            logger.info(f"Found {len(batch_blobs)} intermediate batch files in GCS")
+                logger.info(f"Found {len(batch_blobs)} intermediate batch files in GCS (limited to {max_batches})")
+            else:
+                logger.info(f"Found {len(batch_blobs)} intermediate batch files in GCS")
+
             return batch_blobs
         else:
-            # List local files
-            intermediate_path = Path(self.config.output_path).expanduser() / "intermediate_batches"
-            batch_files = sorted(intermediate_path.glob("batch_*.pt"))
-            
+            # List local files directly in output path
+            intermediate_path = Path(self.config.output_path).expanduser()
+            batch_files = sorted(intermediate_path.glob("intermediate_batch_*.pt"))
+
             if max_batches:
                 batch_files = batch_files[:max_batches]
-            
-            logger.info(f"Found {len(batch_files)} intermediate batch files locally")
+                logger.info(f"Found {len(batch_files)} intermediate batch files locally (limited to {max_batches})")
+            else:
+                logger.info(f"Found {len(batch_files)} intermediate batch files locally")
+
             return batch_files
     
     def count_and_extract_streaming(self, batch_files) -> Tuple[int, List[Tuple]]:
