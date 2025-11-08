@@ -1108,9 +1108,10 @@ class DatasetCreator:
         val_small = []
         test_small = []
         
-        # Optimized write batch size based on available memory
-        # Larger batches = fewer write operations = faster processing
-        write_batch_size = 500  # Increased from 10 to reduce I/O operations
+        # Write batch size: optimized for low-memory machines (15GB RAM)
+        # Each record is ~6-8 MB, and we have 3 accumulators (train/val/test)
+        # 20 records × 7 MB × 3 = ~420 MB - safe for 15GB machines
+        write_batch_size = 20  # Balance between memory usage and I/O efficiency
         
         # Function to load a batch file
         def load_batch(batch_file):
@@ -1129,18 +1130,18 @@ class DatasetCreator:
         
         current_idx = 0
         
-        # Use ThreadPoolExecutor for parallel batch loading with prefetching
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            # Create a queue for prefetching batches
-            batch_queue = queue.Queue(maxsize=5)
-            
-            # Submit initial batch loads
+        # Use ThreadPoolExecutor for batch loading (reduced workers for low-memory machines)
+        # 1 worker = sequential loading, minimizes memory footprint
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            # Minimal prefetch queue to reduce memory usage
             futures_queue = queue.Queue()
-            for i in range(min(5, len(batch_files))):
+
+            # Submit initial batch load (only 1 to minimize memory)
+            for i in range(min(1, len(batch_files))):
                 future = executor.submit(load_batch, batch_files[i])
                 futures_queue.put(future)
-            
-            next_batch_idx = min(5, len(batch_files))
+
+            next_batch_idx = min(1, len(batch_files))
             
             # Process batches with progress bar
             with tqdm(total=len(batch_files), desc="Writing splits") as pbar:
