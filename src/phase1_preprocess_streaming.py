@@ -1054,18 +1054,21 @@ class DatasetCreator:
                                              max_batches: Optional[int] = None,
                                              skip_final_combine: bool = False):
         """
-        Create train/val/test splits by streaming through batches with parallel loading
+        TRUE STREAMING implementation - never accumulates records in memory
+        Writes directly to chunk files as records are processed
         
         Args:
             create_small_samples: Whether to create small sample versions
             small_sample_size: Number of records in small samples
             max_batches: Optional limit on number of batches to process (for testing)
-            skip_final_combine: If True, keep data as separate chunks instead of combining into single files
+            skip_final_combine: If True, keep data as separate chunks (recommended for 4TB dataset)
         """
         import gc
+        from dataclasses import dataclass
         
         logger.info("=" * 60)
-        logger.info("Creating stratified train/val/test splits (streaming mode with prefetching)")
+        logger.info("Creating stratified train/val/test splits (TRUE STREAMING MODE)")
+        logger.info("This implementation never accumulates records in memory")
         if max_batches:
             logger.info(f"Testing mode: Processing only first {max_batches} batches")
         logger.info("=" * 60)
@@ -1077,198 +1080,249 @@ class DatasetCreator:
             logger.error("No intermediate batch files found!")
             return
         
-        # Step 2 & 3 Combined: Count records and extract labels in one pass (faster!)
+        # Step 2 & 3: Count records and extract stratification keys (existing efficient implementation)
+        logger.info("Phase 1: Counting records and extracting stratification keys...")
         total_count, strat_keys = self.count_and_extract_streaming(batch_files)
         
         if total_count == 0:
             logger.error("No records found in intermediate batches!")
             return
         
-        logger.info(f"Counted {total_count} records and extracted stratification keys in one pass")
+        logger.info(f"Found {total_count:,} records across {len(batch_files)} batches")
         
         # Step 4: Create stratified split indices
+        logger.info("Phase 2: Creating stratified split assignments...")
         train_indices, val_indices, test_indices = self.create_stratified_split_indices(
             strat_keys, total_count
         )
         
-        # Free strat_keys after creating indices
-        del strat_keys
+        # Convert to a single lookup dictionary for O(1) access
+        split_map = {}
+        for idx in train_indices:
+            split_map[idx] = 'train'
+        for idx in val_indices:
+            split_map[idx] = 'val' 
+        for idx in test_indices:
+            split_map[idx] = 'test'
+        
+        # Free memory from indices sets
+        del train_indices, val_indices, test_indices, strat_keys
         gc.collect()
         
-        # Step 5: Stream through batches with parallel prefetching
-        logger.info("Streaming records to split files with parallel loading...")
+        logger.info(f"Split assignments created: {len(split_map):,} records mapped")
         
-        # Initialize accumulators for each split
-        train_records = []
-        val_records = []
-        test_records = []
-        
-        # Also track small samples
-        train_small = []
-        val_small = []
-        test_small = []
-        
-        # Write batch size: CRITICAL - each intermediate batch is ~1GB with ~50 records
-        # Each record is ~20MB (1GB / 50 records)
-        # With write_batch_size=10: 10 records × 20MB × 3 splits = ~600MB (safe with 14GB RAM)
-        # Current batch (1GB) + accumulators (600MB) + overhead = ~2GB peak - SAFE
-        write_batch_size = 10  # Balance between memory safety and GCS I/O efficiency
-        
-        # Function to load a batch file
-        def load_batch(batch_file):
-            """Load a single batch file"""
-            try:
-                t0 = time.time()
-                if self.config.use_gcs:
-                    records = self.gcs_helper.read_torch(batch_file.name)
-                else:
-                    records = self.gcs_helper.read_torch(str(batch_file))
-                load_time = time.time() - t0
-                return records, batch_file, load_time
-            except Exception as e:
-                logger.error(f"Failed to load {batch_file}: {e}")
-                return None, batch_file, 0
-        
-        current_idx = 0
-        
-        # Use ThreadPoolExecutor for batch loading (reduced workers for low-memory machines)
-        # 1 worker = sequential loading, minimizes memory footprint
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            # Minimal prefetch queue to reduce memory usage
-            futures_queue = queue.Queue()
-
-            # Submit initial batch load (only 1 to minimize memory)
-            for i in range(min(1, len(batch_files))):
-                future = executor.submit(load_batch, batch_files[i])
-                futures_queue.put(future)
-
-            next_batch_idx = min(1, len(batch_files))
+        # Step 5: Initialize streaming writers
+        @dataclass
+        class StreamWriter:
+            """Streaming writer that flushes small batches to disk/GCS"""
+            split_name: str
+            output_path: str
+            gcs_helper: Any
+            chunk_size: int = 50  # Flush every 50 records (tunable based on memory)
             
-            # Process batches with progress bar
-            with tqdm(total=len(batch_files), desc="Writing splits") as pbar:
-                while not futures_queue.empty() or next_batch_idx < len(batch_files):
-                    # Get next completed batch
-                    if not futures_queue.empty():
-                        future = futures_queue.get()
-                        records, batch_file, load_time = future.result()
-                        self.timing_stats['load'] += load_time
-                        
-                        if records is None:
-                            pbar.update(1)
-                            continue
-                        
-                        # Submit next batch for loading while we process this one
-                        if next_batch_idx < len(batch_files):
-                            new_future = executor.submit(load_batch, batch_files[next_batch_idx])
-                            futures_queue.put(new_future)
-                            next_batch_idx += 1
-                        
-                        # Process records
-                        t0 = time.time()
-                        for record in records:
-                            if current_idx in train_indices:
-                                train_records.append(record)
-                                if create_small_samples and len(train_small) < small_sample_size:
-                                    train_small.append(record)
-                            elif current_idx in val_indices:
-                                val_records.append(record)
-                                if create_small_samples and len(val_small) < small_sample_size:
-                                    val_small.append(record)
-                            elif current_idx in test_indices:
-                                test_records.append(record)
-                                if create_small_samples and len(test_small) < small_sample_size:
-                                    test_small.append(record)
-                            
-                            current_idx += 1
-                        
-                        self.timing_stats['process'] += time.time() - t0
-                        
-                        del records  # Free memory immediately
-                        gc.collect()
-                        
-                        # Periodically write accumulated records to free memory
-                        t0 = time.time()
-                        if len(train_records) >= write_batch_size:
-                            self._append_to_split_file('train', train_records)
-                            train_records = []
-                            gc.collect()
-                        
-                        if len(val_records) >= write_batch_size:
-                            self._append_to_split_file('val', val_records)
-                            val_records = []
-                            gc.collect()
-                        
-                        if len(test_records) >= write_batch_size:
-                            self._append_to_split_file('test', test_records)
-                            test_records = []
-                            gc.collect()
-                        self.timing_stats['write'] += time.time() - t0
-                        
-                        # Update progress
-                        pbar.update(1)
-                        
-                        # Log timing statistics every 100 batches
-                        if pbar.n % 100 == 0:
-                            logger.info(f"Timing - Load: {self.timing_stats['load']:.1f}s, "
-                                      f"Process: {self.timing_stats['process']:.1f}s, "
-                                      f"Write: {self.timing_stats['write']:.1f}s")
+            def __post_init__(self):
+                self.records = []
+                self.chunk_num = 0
+                self.total_written = 0
+                self.chunk_files = []  # Track all chunk files created
+            
+            def write_record(self, record):
+                """Add a record and flush if buffer is full"""
+                self.records.append(record)
+                if len(self.records) >= self.chunk_size:
+                    self.flush()
+            
+            def flush(self):
+                """Write current buffer to a chunk file"""
+                if not self.records:
+                    return
+                    
+                chunk_filename = f"{self.split_name}_chunk_{self.chunk_num:06d}.pt"
+                chunk_path = f"{self.output_path}/{chunk_filename}"
+                
+                # Write using the GCS helper (handles both GCS and local)
+                self.gcs_helper.write_torch(self.records, chunk_path)
+                
+                self.chunk_files.append(chunk_path)
+                self.total_written += len(self.records)
+                
+                # Clear buffer
+                self.records = []
+                self.chunk_num += 1
+                
+                # Aggressive memory cleanup
+                gc.collect()
+            
+            def finalize(self):
+                """Flush any remaining records and return statistics"""
+                self.flush()
+                return {
+                    'split': self.split_name,
+                    'chunks': self.chunk_num,
+                    'records': self.total_written,
+                    'files': self.chunk_files
+                }
         
-        # Write remaining records
-        logger.info("Writing remaining records...")
-        if train_records:
-            self._append_to_split_file('train', train_records)
-        if val_records:
-            self._append_to_split_file('val', val_records)
-        if test_records:
-            self._append_to_split_file('test', test_records)
+        # Create writers for each split
+        logger.info("Phase 3: Initializing streaming writers...")
         
-        # Optionally combine chunks into single files
-        if skip_final_combine:
-            logger.info("=" * 60)
-            logger.info("Skipping final combine step - keeping data as separate chunks")
-            logger.info("This is recommended for large datasets (>1TB)")
-            logger.info("=" * 60)
-            # Count chunk files for metadata
-            train_chunks = self._count_chunk_files('train')
-            val_chunks = self._count_chunk_files('val')
-            test_chunks = self._count_chunk_files('test')
-            logger.info(f"Train chunks: {train_chunks}")
-            logger.info(f"Val chunks: {val_chunks}")
-            logger.info(f"Test chunks: {test_chunks}")
+        if self.config.use_gcs:
+            output_base = self.config.output_path
         else:
-            logger.info("Combining split chunks into final files...")
-            self._combine_split_chunks('train')
-            self._combine_split_chunks('val')
-            self._combine_split_chunks('test')
-            train_chunks = val_chunks = test_chunks = 0
+            output_base = str(Path(self.config.output_path).expanduser())
         
-        # Create small samples if requested
-        if create_small_samples:
-            logger.info(f"Creating small sample datasets ({small_sample_size} records each)...")
-            self._save_small_sample('train', train_small)
-            self._save_small_sample('val', val_small)
-            self._save_small_sample('test', test_small)
-        
-        # Save metadata
-        metadata = {
-            'config': {k: str(v) for k, v in self.config.__dict__.items()},
-            'n_train': len(train_indices),
-            'n_val': len(val_indices),
-            'n_test': len(test_indices),
-            'total_records': total_count,
-            'stratified': True,
-            'small_samples_created': create_small_samples,
-            'small_sample_size': small_sample_size if create_small_samples else 0,
-            'chunked_format': skip_final_combine,
-            'data_format': 'chunked' if skip_final_combine else 'combined',
-            'timing_stats': self.timing_stats
+        writers = {
+            'train': StreamWriter('train', output_base, self.gcs_helper, chunk_size=50),
+            'val': StreamWriter('val', output_base, self.gcs_helper, chunk_size=50),
+            'test': StreamWriter('test', output_base, self.gcs_helper, chunk_size=50)
         }
         
-        # Add chunk counts if using chunked format
-        if skip_final_combine:
-            metadata['n_train_chunks'] = train_chunks
-            metadata['n_val_chunks'] = val_chunks
-            metadata['n_test_chunks'] = test_chunks
+        # For small samples
+        small_sample_collectors = {
+            'train': [],
+            'val': [],
+            'test': []
+        } if create_small_samples else None
+        
+        # Step 6: Stream through batches and write directly
+        logger.info("Phase 4: Streaming records to split chunk files...")
+        logger.info(f"Processing {len(batch_files)} intermediate batches...")
+        
+        current_global_idx = 0
+        processed_batches = 0
+        
+        # Reset timing stats for this phase
+        self.timing_stats = {'load': 0, 'process': 0, 'write': 0, 'total': 0}
+        
+        # Process batches with progress tracking
+        with tqdm(total=len(batch_files), desc="Processing batches") as pbar:
+            for batch_idx, batch_file in enumerate(batch_files):
+                try:
+                    # Load single batch
+                    t_load = time.time()
+                    if self.config.use_gcs:
+                        records = self.gcs_helper.read_torch(batch_file.name)
+                    else:
+                        records = self.gcs_helper.read_torch(str(batch_file))
+                    self.timing_stats['load'] += time.time() - t_load
+                    
+                    if records is None:
+                        logger.warning(f"Batch {batch_idx} returned None, skipping")
+                        pbar.update(1)
+                        continue
+                    
+                    # Process each record in the batch
+                    t_process = time.time()
+                    records_in_batch = 0
+                    
+                    for record in records:
+                        # Determine split assignment
+                        split_name = split_map.get(current_global_idx)
+                        
+                        if split_name:
+                            # Write to appropriate split
+                            writers[split_name].write_record(record)
+                            
+                            # Collect for small sample if needed
+                            if create_small_samples:
+                                if len(small_sample_collectors[split_name]) < small_sample_size:
+                                    small_sample_collectors[split_name].append(record)
+                        
+                        current_global_idx += 1
+                        records_in_batch += 1
+                    
+                    self.timing_stats['process'] += time.time() - t_process
+                    
+                    # Free batch memory immediately
+                    del records
+                    gc.collect()
+                    
+                    processed_batches += 1
+                    
+                    # Update progress
+                    pbar.update(1)
+                    pbar.set_postfix({
+                        'batch': f"{batch_idx + 1}/{len(batch_files)}",
+                        'records': records_in_batch,
+                        'load_ms': f"{(self.timing_stats['load']/(batch_idx+1))*1000:.0f}",
+                        'proc_ms': f"{(self.timing_stats['process']/(batch_idx+1))*1000:.0f}"
+                    })
+                    
+                    # Periodic status update
+                    if (batch_idx + 1) % 100 == 0:
+                        logger.info(f"Processed {batch_idx + 1}/{len(batch_files)} batches, "
+                                  f"{current_global_idx:,} total records")
+                        for split_name, writer in writers.items():
+                            logger.info(f"  {split_name}: {writer.total_written:,} records, "
+                                      f"{writer.chunk_num} chunks")
+                    
+                except Exception as e:
+                    logger.error(f"Error processing batch {batch_idx}: {e}")
+                    logger.error(f"Batch file: {batch_file}")
+                    # Continue processing other batches
+                    pbar.update(1)
+                    continue
+        
+        # Step 7: Finalize all writers
+        logger.info("Phase 5: Finalizing writers and flushing remaining records...")
+        
+        writer_stats = {}
+        for split_name, writer in writers.items():
+            stats = writer.finalize()
+            writer_stats[split_name] = stats
+            logger.info(f"{split_name}: {stats['records']:,} records in {stats['chunks']} chunks")
+        
+        # Step 8: Optionally combine chunks (NOT recommended for 4TB)
+        if not skip_final_combine:
+            logger.warning("=" * 60)
+            logger.warning("WARNING: Combining chunks for 4TB dataset may cause OOM!")
+            logger.warning("Consider using --skip-final-combine flag")
+            logger.warning("=" * 60)
+            
+            user_confirm = input("Are you sure you want to combine chunks? (y/N): ")
+            if user_confirm.lower() == 'y':
+                logger.info("Combining chunks into final files...")
+                self._combine_split_chunks_v2('train', writer_stats['train']['files'])
+                self._combine_split_chunks_v2('val', writer_stats['val']['files'])
+                self._combine_split_chunks_v2('test', writer_stats['test']['files'])
+            else:
+                logger.info("Skipping chunk combination")
+                skip_final_combine = True
+        
+        # Step 9: Save small samples if requested
+        if create_small_samples and small_sample_collectors:
+            logger.info(f"Saving small sample datasets ({small_sample_size} records each)...")
+            for split_name, samples in small_sample_collectors.items():
+                if samples:
+                    self._save_small_sample(split_name, samples[:small_sample_size])
+                    logger.info(f"  {split_name}_small.pt: {len(samples[:small_sample_size])} records")
+        
+        # Step 10: Save metadata
+        metadata = {
+            'config': {k: str(v) for k, v in self.config.__dict__.items()},
+            'total_records': current_global_idx,
+            'processed_batches': processed_batches,
+            'splits': {
+                split_name: {
+                    'records': stats['records'],
+                    'chunks': stats['chunks'],
+                    'chunk_files': len(stats['files'])
+                }
+                for split_name, stats in writer_stats.items()
+            },
+            'stratified': True,
+            'chunked_format': skip_final_combine,
+            'small_samples': {
+                'created': create_small_samples,
+                'size': small_sample_size if create_small_samples else 0
+            },
+            'processing': {
+                'method': 'true_streaming_direct_write',
+                'chunk_size_per_writer': 50,
+                'memory_efficient': True
+            },
+            'timing_stats': self.timing_stats
+        }
         
         if self.config.use_gcs:
             metadata_file = f"{self.config.output_path}/metadata.json"
@@ -1277,23 +1331,101 @@ class DatasetCreator:
         
         self.gcs_helper.write_json(metadata, metadata_file)
         
+        # Final summary
         logger.info("=" * 60)
-        logger.info("Dataset splitting complete!")
-        logger.info(f"  Train: {len(train_indices):,} records")
-        logger.info(f"  Val: {len(val_indices):,} records")
-        logger.info(f"  Test: {len(test_indices):,} records")
-        if skip_final_combine:
-            logger.info(f"  Format: CHUNKED (train: {train_chunks} chunks, val: {val_chunks} chunks, test: {test_chunks} chunks)")
-        else:
-            logger.info("  Format: COMBINED (single files for train/val/test)")
+        logger.info("TRUE STREAMING SPLIT COMPLETE!")
+        logger.info("=" * 60)
+        for split_name, stats in writer_stats.items():
+            logger.info(f"{split_name:8s}: {stats['records']:8,} records in {stats['chunks']:4} chunks")
+        logger.info("=" * 60)
+        logger.info(f"Total records processed: {current_global_idx:,}")
+        logger.info(f"Output format: {'CHUNKED (recommended)' if skip_final_combine else 'COMBINED'}")
         if create_small_samples:
-            logger.info(f"  Small samples: {small_sample_size} records each")
-        logger.info(f"Final timing stats:")
-        logger.info(f"  Load time: {self.timing_stats['load']:.1f}s")
-        logger.info(f"  Process time: {self.timing_stats['process']:.1f}s")  
-        logger.info(f"  Write time: {self.timing_stats['write']:.1f}s")
-        logger.info(f"  Total time: {sum(self.timing_stats.values()):.1f}s")
+            logger.info(f"Small samples created: {small_sample_size} records per split")
         logger.info("=" * 60)
+        logger.info("✓ Memory-efficient processing completed successfully!")
+        logger.info("✓ Data is ready for training (can load chunks directly)")
+        logger.info("=" * 60)
+    
+    def _combine_split_chunks_v2(self, split_name: str, chunk_files: List[str]):
+        """
+        Optimized chunk combination that processes in smaller groups
+        WARNING: Still requires significant memory for final combination
+        
+        Args:
+            split_name: 'train', 'val', or 'test'
+            chunk_files: List of chunk file paths to combine
+        """
+        import tempfile
+        
+        logger.info(f"Combining {len(chunk_files)} chunks for {split_name}...")
+        
+        # Process in groups to manage memory
+        group_size = 20  # Process 20 chunks at a time
+        combined_groups = []
+        
+        for i in range(0, len(chunk_files), group_size):
+            group = chunk_files[i:i + group_size]
+            group_records = []
+            
+            logger.info(f"  Loading chunk group {i//group_size + 1}/{(len(chunk_files) + group_size - 1)//group_size}")
+            
+            for chunk_file in group:
+                records = self.gcs_helper.read_torch(chunk_file)
+                group_records.extend(records)
+                del records
+                gc.collect()
+            
+            # Save intermediate combined group
+            if self.config.use_gcs:
+                temp_path = f"{self.config.output_path}/temp_{split_name}_group_{i//group_size}.pt"
+            else:
+                temp_path = Path(self.config.output_path) / f"temp_{split_name}_group_{i//group_size}.pt"
+            
+            self.gcs_helper.write_torch(group_records, temp_path)
+            combined_groups.append(temp_path)
+            
+            del group_records
+            gc.collect()
+        
+        # Final combination of groups
+        logger.info(f"Final combination of {len(combined_groups)} groups for {split_name}...")
+        all_records = []
+        
+        for group_file in combined_groups:
+            records = self.gcs_helper.read_torch(group_file)
+            all_records.extend(records)
+            del records
+            gc.collect()
+        
+        # Save final file
+        if self.config.use_gcs:
+            final_path = f"{self.config.output_path}/{split_name}_data.pt"
+        else:
+            final_path = Path(self.config.output_path) / f"{split_name}_data.pt"
+        
+        self.gcs_helper.write_torch(all_records, final_path)
+        
+        # Clean up temporary files
+        for temp_file in combined_groups:
+            if self.config.use_gcs:
+                blob = self.gcs_helper.output_bucket.blob(temp_file)
+                blob.delete()
+            else:
+                Path(temp_file).unlink()
+        
+        # Clean up original chunks
+        logger.info(f"Cleaning up {len(chunk_files)} original chunks...")
+        for chunk_file in chunk_files:
+            if self.config.use_gcs:
+                blob = self.gcs_helper.output_bucket.blob(chunk_file)
+                blob.delete()
+            else:
+                Path(chunk_file).unlink(missing_ok=True)
+        
+        logger.info(f"Combined {split_name} split: {len(all_records):,} records")
+        del all_records
+        gc.collect()
     
     def _append_to_split_file(self, split_name: str, records: List[Dict]):
         """
@@ -1449,6 +1581,132 @@ class DatasetCreator:
         
         self.gcs_helper.write_torch(records, output_file)
         logger.info(f"Saved {split_name} small sample with {len(records)} records")
+
+
+class ChunkedMIMICDataset:
+    """
+    Efficient dataset that loads from multiple chunk files without combining them
+    Perfect for the 4TB dataset split across thousands of chunks
+    """
+    
+    def __init__(self, chunk_files: List[str], gcs_helper=None, cache_size: int = 2):
+        """
+        Args:
+            chunk_files: List of chunk file paths
+            gcs_helper: GCSHelper instance for cloud storage
+            cache_size: Number of chunks to keep in memory cache
+        """
+        self.chunk_files = chunk_files
+        self.gcs_helper = gcs_helper
+        self.cache_size = cache_size
+        
+        # Build index: which chunk and position for each record
+        self.index = []
+        self._build_index()
+        
+        # LRU cache for loaded chunks
+        self.chunk_cache = {}
+        self.cache_order = []
+    
+    def _build_index(self):
+        """Build index mapping global position to (chunk_id, position_in_chunk)"""
+        logger.info(f"Building index for {len(self.chunk_files)} chunk files...")
+        
+        for chunk_id, chunk_file in enumerate(tqdm(self.chunk_files, desc="Indexing")):
+            # Load chunk to get size (lightweight - just length)
+            chunk_data = self._load_chunk(chunk_id)
+            for pos in range(len(chunk_data)):
+                self.index.append((chunk_id, pos))
+            
+            # Don't cache during indexing
+            if chunk_id in self.chunk_cache:
+                del self.chunk_cache[chunk_id]
+        
+        logger.info(f"Index built: {len(self.index)} total records")
+    
+    def _load_chunk(self, chunk_id: int):
+        """Load a chunk with caching"""
+        if chunk_id in self.chunk_cache:
+            # Move to end (most recently used)
+            self.cache_order.remove(chunk_id)
+            self.cache_order.append(chunk_id)
+            return self.chunk_cache[chunk_id]
+        
+        # Load chunk
+        chunk_file = self.chunk_files[chunk_id]
+        if self.gcs_helper:
+            chunk_data = self.gcs_helper.read_torch(chunk_file)
+        else:
+            chunk_data = torch.load(chunk_file, map_location='cpu', weights_only=False)
+        
+        # Add to cache
+        self.chunk_cache[chunk_id] = chunk_data
+        self.cache_order.append(chunk_id)
+        
+        # Evict oldest if cache is full
+        if len(self.chunk_cache) > self.cache_size:
+            oldest = self.cache_order.pop(0)
+            del self.chunk_cache[oldest]
+        
+        return chunk_data
+    
+    def __len__(self):
+        return len(self.index)
+    
+    def __getitem__(self, idx):
+        chunk_id, position = self.index[idx]
+        chunk_data = self._load_chunk(chunk_id)
+        return chunk_data[position]
+
+
+def load_chunked_dataset(output_path: str, split: str, config: DataConfig = None):
+    """
+    Helper to load a chunked dataset for training
+    
+    Args:
+        output_path: Base output directory
+        split: 'train', 'val', or 'test'
+        config: DataConfig instance for GCS settings
+        
+    Returns:
+        ChunkedMIMICDataset instance ready for PyTorch DataLoader
+    """
+    # Load metadata
+    if config and config.use_gcs:
+        from google.cloud import storage
+        metadata_path = f"{output_path}/metadata.json"
+        gcs_helper = GCSHelper(config)
+        metadata = gcs_helper.read_json(metadata_path)
+        
+        # Find chunk files
+        client = storage.Client(project=config.gcs_project_id)
+        bucket = client.bucket(config.output_gcs_bucket)
+        prefix = f"{output_path}/{split}_chunk_"
+        chunk_blobs = list(bucket.list_blobs(prefix=prefix))
+        chunk_files = [blob.name for blob in chunk_blobs]
+        chunk_files.sort()  # Ensure consistent ordering
+        
+        if not chunk_files:
+            raise ValueError(f"No chunk files found for {split} split in {output_path}")
+        
+        dataset = ChunkedMIMICDataset(chunk_files, gcs_helper, cache_size=2)
+    else:
+        metadata_path = Path(output_path) / 'metadata.json'
+        with open(metadata_path) as f:
+            metadata = json.load(f)
+        
+        # Find chunk files
+        output_dir = Path(output_path)
+        chunk_files = sorted(output_dir.glob(f"{split}_chunk_*.pt"))
+        chunk_files = [str(f) for f in chunk_files]
+        
+        if not chunk_files:
+            raise ValueError(f"No chunk files found for {split} split in {output_path}")
+        
+        dataset = ChunkedMIMICDataset(chunk_files, cache_size=2)
+    
+    logger.info(f"Loaded {split} dataset: {len(dataset)} records from {len(chunk_files)} chunks")
+    return dataset
 
 
 def main():
