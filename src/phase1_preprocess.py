@@ -1108,10 +1108,11 @@ class DatasetCreator:
         val_small = []
         test_small = []
         
-        # Write batch size: optimized for low-memory machines (15GB RAM)
-        # Each record is ~6-8 MB, and we have 3 accumulators (train/val/test)
-        # 20 records × 7 MB × 3 = ~420 MB - safe for 15GB machines
-        write_batch_size = 20  # Balance between memory usage and I/O efficiency
+        # Write batch size: CRITICAL - each intermediate batch is ~1GB with ~50 records
+        # Each record is ~20MB (1GB / 50 records)
+        # With write_batch_size=1: 1 record × 20MB × 3 splits = ~60MB (minimal memory)
+        # Current batch (1GB) + accumulators (60MB) + overhead = ~1.5GB per batch - SAFE
+        write_batch_size = 1  # Write immediately to minimize memory footprint
         
         # Function to load a batch file
         def load_batch(batch_file):
