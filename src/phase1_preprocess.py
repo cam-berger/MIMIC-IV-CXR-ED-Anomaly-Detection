@@ -995,9 +995,10 @@ class DatasetCreator:
                 return 0, []
         
         # Process with progress bar
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        # CRITICAL: max_workers=1 to prevent OOM (4 workers = 4GB+ in memory simultaneously)
+        with ThreadPoolExecutor(max_workers=1) as executor:
             futures = [executor.submit(process_batch_for_counting, bf) for bf in batch_files]
-            
+
             for future in tqdm(as_completed(futures), total=len(batch_files), desc="Counting & extracting"):
                 count, keys = future.result()
                 total_count += count
