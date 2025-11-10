@@ -1,6 +1,15 @@
 """
-Run preprocessing pipeline locally (for testing) or submit to AWS Batch
-Supports comprehensive clinical data extraction
+DEPRECATED: This script uses the old AWS-based pipeline.
+
+For the new GCS-based pipeline, use:
+  - Phase 1: python src/phase1_preprocess_streaming.py
+  - Phase 2: python src/phase2_enhanced_notes.py
+  - Phase 3: python src/phase3_integration.py (needs refactoring)
+
+See docs/PHASE2_ENHANCED_NOTES.md for Phase 2 usage.
+See README.md for updated pipeline documentation.
+
+This file is kept for reference but is no longer maintained.
 """
 
 import sys
@@ -16,11 +25,12 @@ import json
 from loguru import logger
 from typing import Optional, Dict, List
 
-from src.utils import setup_logging
-from src.config_manager import get_config
-from src.phase1_stay_identification import StayIdentifier
-from src.phase2_clinical_extraction import ClinicalExtractor
-from src.phase3_integration import DataIntegrator
+# NOTE: These imports reference old/non-existent modules
+# from src.utils import setup_logging
+# from src.config_manager import get_config  # Does not exist
+# from src.phase1_stay_identification import StayIdentifier
+# from src.phase2_clinical_extraction import ClinicalExtractor  # Removed
+# from src.phase3_integration import DataIntegrator  # Needs refactoring
 
 
 def run_local(

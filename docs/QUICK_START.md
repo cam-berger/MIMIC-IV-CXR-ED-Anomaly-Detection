@@ -105,36 +105,66 @@ aws s3 ls s3://bergermimiciv/mimic-cxr-jpg/2.1.0/files/ --recursive | wc -l
 
 ## Next Steps: Run Your Pipeline
 
-### Phase 1: Link CXRs to ED Stays
+### Phase 1: Preprocess Images and Clinical Data
 ```bash
-python -m src.phase1_stay_identification
-```
-Links chest X-rays to emergency department visits using timestamps.
+# Full pipeline (GCS)
+python src/phase1_preprocess_streaming.py \
+  --gcs-bucket bergermimiciv \
+  --gcs-cxr-bucket mimic-cxr-jpg-2.1.0.physionet.org \
+  --gcs-project-id YOUR_PROJECT_ID \
+  --output-path processed/phase1_output \
+  --create-small-samples
 
-### Phase 2: Extract Clinical Data
-```bash
-python -m src.phase2_clinical_extraction
+# Or local mode
+python src/phase1_preprocess_streaming.py \
+  --mimic-cxr-path ~/MIMIC_Data/mimic-cxr-jpg \
+  --mimic-iv-path ~/MIMIC_Data/mimiciv/3.1 \
+  --mimic-ed-path ~/MIMIC_Data/mimic-iv-ed/2.2 \
+  --output-path ~/MIMIC_Data/processed/phase1_output
 ```
-Extracts labs, vitals, medications, diagnoses for each ED stay.
+Preprocesses images (518x518), extracts clinical features, creates train/val/test splits.
 
-### Phase 3: Integrate Everything
+### Phase 2: Generate Pseudo-Notes and Enhance with RAG
 ```bash
-python -m src.phase3_integration
+# Full pipeline (GCS)
+python src/phase2_enhanced_notes.py \
+  --input-path processed/phase1_output \
+  --gcs-bucket bergermimiciv \
+  --gcs-project-id YOUR_PROJECT_ID \
+  --max-text-length 8192 \
+  --top-k-retrieval 5
+
+# Or local mode
+python src/phase2_enhanced_notes.py \
+  --input-path ~/MIMIC_Data/processed/phase1_output \
+  --max-text-length 8192
+
+# Quick test with small samples
+python src/phase2_enhanced_notes.py \
+  --input-path processed/phase1_output \
+  --use-small-sample
 ```
-Combines images + clinical data into final multimodal dataset.
+Converts structured data → narrative clinical notes, enhances with medical knowledge via RAG.
+
+**See [docs/PHASE2_ENHANCED_NOTES.md](PHASE2_ENHANCED_NOTES.md) for detailed Phase 2 documentation.**
 
 ---
 
 ## Your Multimodal Dataset
 
-After running the pipeline, you'll have:
-- ✅ **377,110 chest X-ray images** (or your sample size)
-- ✅ **Clinical data** (labs, vitals, medications) for each image
-- ✅ **ED stay information** (arrival time, diagnoses, outcomes)
+After running the pipeline (Phase 1 + Phase 2), you'll have:
+- ✅ **377,110 chest X-ray images** preprocessed (518x518, BiomedCLIP format)
+- ✅ **Narrative clinical notes** generated from structured vitals/demographics
+- ✅ **RAG-enhanced notes** with medical knowledge context
+- ✅ **Tokenized text** ready for Clinical ModernBERT (8192 token context)
 - ✅ **CheXpert labels** for anomaly detection
-- ✅ **Train/val/test splits** ready for modeling
+- ✅ **Train/val/test splits** (70/15/15) ready for modeling
 
-**Perfect for multimodal deep learning anomaly detection!** 🎯
+**Perfect for Enhanced MDF-Net multimodal deep learning!** 🎯
+
+**Output files:**
+- `train_data_enhanced.pt`, `val_data_enhanced.pt`, `test_data_enhanced.pt`
+- Each record contains: image tensors + clinical features + pseudo-notes + RAG-enhanced text + tokenized inputs
 
 ---
 
