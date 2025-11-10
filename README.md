@@ -4,7 +4,7 @@ HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused w
 
 ## Recent Improvements (October 2025)
 
-🚀 **Major Performance & Reliability Enhancements**:
+**Major Performance & Reliability Enhancements**:
 - **20-40x Faster Processing**: Batch downloading with parallel workers reduces processing time from 12 days to 7-15 hours
 - **Fixed Critical Path Bug**: Corrected MIMIC-CXR image path construction (8-digit padding) - was causing 100% image lookup failures
 - **Smart Caching**: Eliminates duplicate downloads (previously downloading each image twice per record)
@@ -17,9 +17,9 @@ HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused w
 - **Small Sample Datasets**: Automatically generate small test versions for rapid Phase 2 development
 
 ### Technical Documentation
-- 📋 **[OPUS Fixes Verification](OPUS_FIXES_VERIFICATION.md)**: Complete verification of all 5 critical issues identified and fixed
-- 🔧 **[OOM Fix Summary](SESSION_OOM_FIX_SUMMARY.md)**: Detailed analysis and solution for memory management issues
-- 📊 All fixes verified and deployed to production (VM: mimic-preprocessing-20251026-092532)
+- **[OPUS Fixes Verification](OPUS_FIXES_VERIFICATION.md)**: Complete verification of all 5 critical issues identified and fixed
+- **[OOM Fix Summary](SESSION_OOM_FIX_SUMMARY.md)**: Detailed analysis and solution for memory management issues
+- All fixes verified and deployed to production (VM: mimic-preprocessing-20251026-092532)
 
 ## Overview
 
@@ -33,19 +33,19 @@ The pipeline links MIMIC-CXR chest X-rays with MIMIC-IV-ED emergency department 
 
 ## Key Features
 
-- ✅ **Multi-Bucket GCS Support**: Seamlessly works with your data bucket + PhysioNet's public MIMIC-CXR bucket
-- ✅ **Flexible File Format Support**: Handles both compressed (.csv.gz) and uncompressed (.csv) data files
-- ✅ **Pseudo-Note Generation**: Converts structured clinical data into narrative text for LLM processing
-- ✅ **Diagnosis Leakage Filtering**: Removes diagnosis information to prevent data leakage
-- ✅ **Temporal Alignment**: Links chest X-rays to ED visits within 24-hour windows with accurate StudyDate+StudyTime matching
-- ✅ **Optimized Image Processing**: Batch downloading with parallel workers (20-40x faster than sequential)
-- ✅ **Smart Caching**: Eliminates duplicate downloads per record, saving bandwidth and time
-- ✅ **Robust Error Handling**: Continues processing past failed images with detailed logging
-- ✅ **Correct Path Construction**: Properly handles MIMIC-CXR's 8-digit padded directory structure
-- ✅ **Local Testing**: Test preprocessing locally before cloud deployment
-- ✅ **Automated GCP Deployment**: One-command deployment with auto-shutdown
-- ✅ **Scalable**: Successfully processes 107,949+ matched multimodal records
-- ✅ **Cloud-Native**: Optimized for Google Cloud Platform (Compute Engine, Cloud Storage)
+- **Multi-Bucket GCS Support**: Seamlessly works with your data bucket + PhysioNet's public MIMIC-CXR bucket
+- **Flexible File Format Support**: Handles both compressed (.csv.gz) and uncompressed (.csv) data files
+- **Pseudo-Note Generation**: Converts structured clinical data into narrative text for LLM processing
+- **Diagnosis Leakage Filtering**: Removes diagnosis information to prevent data leakage
+- **Temporal Alignment**: Links chest X-rays to ED visits within 24-hour windows with accurate StudyDate+StudyTime matching
+- **Optimized Image Processing**: Batch downloading with parallel workers (20-40x faster than sequential)
+- **Smart Caching**: Eliminates duplicate downloads per record, saving bandwidth and time
+- **Robust Error Handling**: Continues processing past failed images with detailed logging
+- **Correct Path Construction**: Properly handles MIMIC-CXR's 8-digit padded directory structure
+- **Local Testing**: Test preprocessing locally before cloud deployment
+- **Automated GCP Deployment**: One-command deployment with auto-shutdown
+- **Scalable**: Successfully processes 107,949+ matched multimodal records
+- **Cloud-Native**: Optimized for Google Cloud Platform (Compute Engine, Cloud Storage)
 
 ## Architecture
 
@@ -638,4 +638,4 @@ For questions or issues:
 ---
 
 **Last Updated**: 2025-10-28
-**Status**: Phase 1 Complete ✅ | Memory-Efficient Streaming ✅ | Stratified Splitting ✅ | Resume Capability ✅ | Small Sample Datasets ✅ | 107,949+ Records Matched ✅ | Runs on 7.5GB RAM ✅
+**Status**: Phase 1 Complete | Memory-Efficient Streaming | Stratified Splitting | Resume Capability | Small Sample Datasets | 107,949+ Records Matched | Runs on 7.5GB RAM

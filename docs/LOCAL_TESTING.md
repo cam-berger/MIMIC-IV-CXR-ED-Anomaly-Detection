@@ -5,9 +5,9 @@ This guide helps you test Phase 1 preprocessing functionality on your resource-l
 ## Prerequisites
 
 ### What You Have
-- ✅ MIMIC-IV dataset (CSV files) - Hospital data in `mimiciv/3.1/`
-- ✅ MIMIC-IV-ED dataset (CSV files) - Emergency Department data in `mimic-iv-ed/2.2/` (separate dataset!)
-- ✅ MIMIC-CXR-JPG metadata (without images)
+- MIMIC-IV dataset (CSV files) - Hospital data in `mimiciv/3.1/`
+- MIMIC-IV-ED dataset (CSV files) - Emergency Department data in `mimic-iv-ed/2.2/` (separate dataset!)
+- MIMIC-CXR-JPG metadata (without images)
 
 ### What You Need to Install
 
@@ -55,10 +55,10 @@ python src/test_phase1_local.py \
 ```
 
 **What this tests:**
-1. ✓ Metadata loading (MIMIC-CXR, MIMIC-IV-ED)
-2. ✓ Pseudo-note creation from clinical data
-3. ✓ Text preprocessing and tokenization
-4. ✓ Image preprocessing pipeline setup (without loading images)
+1. Metadata loading (MIMIC-CXR, MIMIC-IV-ED)
+2. Pseudo-note creation from clinical data
+3. Text preprocessing and tokenization
+4. Image preprocessing pipeline setup (without loading images)
 
 **Estimated time:** 2-5 minutes (includes downloading ModernBERT tokenizer on first run)
 **Memory usage:** < 2 GB
@@ -92,8 +92,8 @@ python src/test_phase1_local.py \
 
 **What this tests:**
 1. Everything from Option 2, plus:
-2. ✓ Actual image loading and preprocessing
-3. ✓ Image tensor creation with BiomedCLIP transforms
+2. Actual image loading and preprocessing
+3. Image tensor creation with BiomedCLIP transforms
 
 **Estimated time:** 3-10 minutes
 **Memory usage:** 2-4 GB (depending on number of images)
@@ -107,8 +107,8 @@ python src/test_phase1_local.py \
 TEST 1: Loading Metadata (No Images)
 ==================================================================
 INFO - Loaded 377,110 CXR metadata records
-✓ Loaded CXR metadata
-✓ Loaded 6 ED tables
+Loaded CXR metadata
+Loaded 6 ED tables
   - edstays: 425,087 records
   - triage: 425,087 records
   ...
@@ -116,14 +116,14 @@ INFO - Loaded 377,110 CXR metadata records
 ==================================================================
 TEST SUMMARY
 ==================================================================
-data_loading........................ ✓ PASS
-pseudo_notes........................ ✓ PASS
-text_preprocessing.................. ✓ PASS
-image_setup......................... ✓ PASS
+data_loading........................ PASS
+pseudo_notes........................ PASS
+text_preprocessing.................. PASS
+image_setup......................... PASS
 
 Passed: 4/4
 
-🎉 All tests passed! Your Phase 1 setup is working correctly.
+All tests passed! Your Phase 1 setup is working correctly.
 ```
 
 ### Common Issues
@@ -193,23 +193,23 @@ python src/phase1_stay_identification.py \
 ## What Gets Tested
 
 ### Data Loading & Joining
-- ✓ MIMIC-CXR metadata loading (frontal views filtering)
-- ✓ MIMIC-IV-ED data loading (edstays, triage, vitalsign tables)
-- ✓ Timestamp-based joining (within 24-hour windows)
-- ✓ Subject ID matching across datasets
+- MIMIC-CXR metadata loading (frontal views filtering)
+- MIMIC-IV-ED data loading (edstays, triage, vitalsign tables)
+- Timestamp-based joining (within 24-hour windows)
+- Subject ID matching across datasets
 
 ### Clinical Text Processing
-- ✓ Pseudo-note creation from structured data
-- ✓ Medical abbreviation expansion
-- ✓ Text cleaning and normalization
-- ✓ Tokenization with ModernBERT
-- ✓ Medical entity extraction
+- Pseudo-note creation from structured data
+- Medical abbreviation expansion
+- Text cleaning and normalization
+- Tokenization with ModernBERT
+- Medical entity extraction
 
 ### Image Processing (if images available)
-- ✓ Image loading and conversion
-- ✓ Resizing to target dimensions
-- ✓ Normalization with BiomedCLIP parameters
-- ✓ Tensor creation for model input
+- Image loading and conversion
+- Resizing to target dimensions
+- Normalization with BiomedCLIP parameters
+- Tensor creation for model input
 
 ## Resource Requirements by Test Type
 

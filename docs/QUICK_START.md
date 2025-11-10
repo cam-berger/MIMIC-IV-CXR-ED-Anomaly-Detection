@@ -3,10 +3,10 @@
 ## Download Chest X-Ray Images + Clinical Data for Deep Learning
 
 This project uses **MIMIC-CXR-JPG 2.1.0** which includes:
-- ✅ 377,110 chest X-ray images (JPG format)
-- ✅ CheXpert labels (14 diagnoses)
-- ✅ Metadata with dates/times for linking to ED stays
-- ✅ Train/validation/test splits
+- 377,110 chest X-ray images (JPG format)
+- CheXpert labels (14 diagnoses)
+- Metadata with dates/times for linking to ED stays
+- Train/validation/test splits
 
 ---
 
@@ -31,7 +31,7 @@ Download Options:
   4. Cancel
 ```
 
-### ⭐ Recommended: Start with Sample
+### Recommended: Start with Sample
 
 **For Development/Testing:**
 - Choose **Option 2** (1,000 images)
@@ -63,7 +63,7 @@ s3://bergermimiciv/mimic-cxr-jpg/2.1.0/
 
 ---
 
-## ✅ Key Features
+## Key Features
 
 ### Streams Directly to S3
 - **No local disk space needed**
@@ -153,14 +153,14 @@ Converts structured data → narrative clinical notes, enhances with medical kno
 ## Your Multimodal Dataset
 
 After running the pipeline (Phase 1 + Phase 2), you'll have:
-- ✅ **377,110 chest X-ray images** preprocessed (518x518, BiomedCLIP format)
-- ✅ **Narrative clinical notes** generated from structured vitals/demographics
-- ✅ **RAG-enhanced notes** with medical knowledge context
-- ✅ **Tokenized text** ready for Clinical ModernBERT (8192 token context)
-- ✅ **CheXpert labels** for anomaly detection
-- ✅ **Train/val/test splits** (70/15/15) ready for modeling
+- **377,110 chest X-ray images** preprocessed (518x518, BiomedCLIP format)
+- **Narrative clinical notes** generated from structured vitals/demographics
+- **RAG-enhanced notes** with medical knowledge context
+- **Tokenized text** ready for Clinical ModernBERT (8192 token context)
+- **CheXpert labels** for anomaly detection
+- **Train/val/test splits** (70/15/15) ready for modeling
 
-**Perfect for Enhanced MDF-Net multimodal deep learning!** 🎯
+**Perfect for Enhanced MDF-Net multimodal deep learning!**
 
 **Output files:**
 - `train_data_enhanced.pt`, `val_data_enhanced.pt`, `test_data_enhanced.pt`

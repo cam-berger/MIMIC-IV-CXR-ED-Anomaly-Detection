@@ -15,13 +15,13 @@ Phase 2 integrates with Phase 1 outputs to generate narrative pseudo-notes from 
 
 ## Key Features
 
-- ✅ **Unified with Phase 1**: Uses same `DataConfig` and `GCSHelper` from phase1_preprocess_streaming.py
-- ✅ **GCS + Local Support**: Works with both Google Cloud Storage and local filesystems
-- ✅ **Narrative Generation**: Converts structured vitals/demographics into clinical narrative
-- ✅ **RAG Integration**: FAISS-based retrieval of relevant medical knowledge
-- ✅ **Medical Knowledge Base**: 15+ medical knowledge documents covering common ED presentations
-- ✅ **Abbreviation Expansion**: Expands common medical abbreviations (HTN → hypertension)
-- ✅ **Preserves Original Data**: Keeps all Phase 1 data intact, adds enhanced fields
+- **Unified with Phase 1**: Uses same `DataConfig` and `GCSHelper` from phase1_preprocess_streaming.py
+- **GCS + Local Support**: Works with both Google Cloud Storage and local filesystems
+- **Narrative Generation**: Converts structured vitals/demographics into clinical narrative
+- **RAG Integration**: FAISS-based retrieval of relevant medical knowledge
+- **Medical Knowledge Base**: 15+ medical knowledge documents covering common ED presentations
+- **Abbreviation Expansion**: Expands common medical abbreviations (HTN → hypertension)
+- **Preserves Original Data**: Keeps all Phase 1 data intact, adds enhanced fields
 
 ## Architecture
 
