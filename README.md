@@ -4,7 +4,7 @@ HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused w
 
 ## Recent Improvements (October 2025)
 
-🚀 **Major Performance & Reliability Enhancements**:
+**Major Performance & Reliability Enhancements**:
 - **20-40x Faster Processing**: Batch downloading with parallel workers reduces processing time from 12 days to 7-15 hours
 - **Fixed Critical Path Bug**: Corrected MIMIC-CXR image path construction (8-digit padding) - was causing 100% image lookup failures
 - **Smart Caching**: Eliminates duplicate downloads (previously downloading each image twice per record)
@@ -17,9 +17,9 @@ HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused w
 - **Small Sample Datasets**: Automatically generate small test versions for rapid Phase 2 development
 
 ### Technical Documentation
-- 📋 **[OPUS Fixes Verification](OPUS_FIXES_VERIFICATION.md)**: Complete verification of all 5 critical issues identified and fixed
-- 🔧 **[OOM Fix Summary](SESSION_OOM_FIX_SUMMARY.md)**: Detailed analysis and solution for memory management issues
-- 📊 All fixes verified and deployed to production (VM: mimic-preprocessing-20251026-092532)
+- **[OPUS Fixes Verification](OPUS_FIXES_VERIFICATION.md)**: Complete verification of all 5 critical issues identified and fixed
+- **[OOM Fix Summary](SESSION_OOM_FIX_SUMMARY.md)**: Detailed analysis and solution for memory management issues
+- All fixes verified and deployed to production (VM: mimic-preprocessing-20251026-092532)
 
 ## Overview
 
@@ -33,19 +33,19 @@ The pipeline links MIMIC-CXR chest X-rays with MIMIC-IV-ED emergency department 
 
 ## Key Features
 
-- ✅ **Multi-Bucket GCS Support**: Seamlessly works with your data bucket + PhysioNet's public MIMIC-CXR bucket
-- ✅ **Flexible File Format Support**: Handles both compressed (.csv.gz) and uncompressed (.csv) data files
-- ✅ **Pseudo-Note Generation**: Converts structured clinical data into narrative text for LLM processing
-- ✅ **Diagnosis Leakage Filtering**: Removes diagnosis information to prevent data leakage
-- ✅ **Temporal Alignment**: Links chest X-rays to ED visits within 24-hour windows with accurate StudyDate+StudyTime matching
-- ✅ **Optimized Image Processing**: Batch downloading with parallel workers (20-40x faster than sequential)
-- ✅ **Smart Caching**: Eliminates duplicate downloads per record, saving bandwidth and time
-- ✅ **Robust Error Handling**: Continues processing past failed images with detailed logging
-- ✅ **Correct Path Construction**: Properly handles MIMIC-CXR's 8-digit padded directory structure
-- ✅ **Local Testing**: Test preprocessing locally before cloud deployment
-- ✅ **Automated GCP Deployment**: One-command deployment with auto-shutdown
-- ✅ **Scalable**: Successfully processes 107,949+ matched multimodal records
-- ✅ **Cloud-Native**: Optimized for Google Cloud Platform (Compute Engine, Cloud Storage)
+- **Multi-Bucket GCS Support**: Seamlessly works with your data bucket + PhysioNet's public MIMIC-CXR bucket
+- **Flexible File Format Support**: Handles both compressed (.csv.gz) and uncompressed (.csv) data files
+- **Pseudo-Note Generation**: Converts structured clinical data into narrative text for LLM processing
+- **Diagnosis Leakage Filtering**: Removes diagnosis information to prevent data leakage
+- **Temporal Alignment**: Links chest X-rays to ED visits within 24-hour windows with accurate StudyDate+StudyTime matching
+- **Optimized Image Processing**: Batch downloading with parallel workers (20-40x faster than sequential)
+- **Smart Caching**: Eliminates duplicate downloads per record, saving bandwidth and time
+- **Robust Error Handling**: Continues processing past failed images with detailed logging
+- **Correct Path Construction**: Properly handles MIMIC-CXR's 8-digit padded directory structure
+- **Local Testing**: Test preprocessing locally before cloud deployment
+- **Automated GCP Deployment**: One-command deployment with auto-shutdown
+- **Scalable**: Successfully processes 107,949+ matched multimodal records
+- **Cloud-Native**: Optimized for Google Cloud Platform (Compute Engine, Cloud Storage)
 
 ## Architecture
 
@@ -193,24 +193,28 @@ python src/run_full_pipeline.py \
 ```
 .
 ├── src/
-│   ├── phase1_preprocess.py        # Main preprocessing pipeline
-│   ├── phase1_stay_identification.py  # ED stay linking
-│   ├── run_full_pipeline.py        # Orchestrates preprocessing + leakage filtering
-│   ├── apply_leakage_filter.py     # Diagnosis leakage filtering
-│   ├── leakage_filt_util.py        # Leakage filtering utilities
-│   └── test_phase1_local.py        # Local testing script
+│   ├── phase1_preprocess.py             # Main preprocessing pipeline
+│   ├── phase1_preprocess_streaming.py   # Memory-efficient streaming version
+│   ├── phase1_stay_identification.py    # ED stay linking
+│   ├── phase2_enhanced_notes.py         # Pseudo-note generation + RAG enhancement
+│   ├── phase3_integration.py            # Multi-modal data integration
+│   ├── run_full_pipeline.py             # Orchestrates preprocessing + leakage filtering
+│   ├── apply_leakage_filter.py          # Diagnosis leakage filtering
+│   ├── leakage_filt_util.py             # Leakage filtering utilities
+│   └── test_phase1_local.py             # Local testing script
 ├── scripts/
-│   ├── deploy_gcp.sh               # Automated GCP VM deployment
-│   └── vm_startup.sh               # VM initialization script
+│   ├── deploy_gcp.sh                    # Automated GCP VM deployment
+│   └── vm_startup.sh                    # VM initialization script
 ├── docs/
-│   ├── GCP_DEPLOYMENT.md           # Complete GCP deployment guide
-│   ├── GCS_SETUP.md                # Google Cloud setup guide
-│   ├── ARCHITECTURE.md             # System architecture
-│   └── IMAGE_DOWNLOAD_GUIDE.md     # MIMIC-CXR download guide
-├── LOCAL_TESTING.md                # Local testing guide
-├── DEPLOYMENT_QUICKSTART.md        # Quick deployment reference
-├── PSEUDO_NOTES_EXPLAINED.md       # Pseudo-note generation explained
-└── README.md                       # This file
+│   ├── GCP_DEPLOYMENT.md                # Complete GCP deployment guide
+│   ├── GCS_SETUP.md                     # Google Cloud setup guide
+│   ├── ARCHITECTURE.md                  # System architecture
+│   ├── IMAGE_DOWNLOAD_GUIDE.md          # MIMIC-CXR download guide
+│   └── PHASE2_ENHANCED_NOTES.md         # Phase 2 documentation
+├── LOCAL_TESTING.md                     # Local testing guide
+├── DEPLOYMENT_QUICKSTART.md             # Quick deployment reference
+├── PHASE2_REFACTORING_SUMMARY.md        # Phase 2 refactoring details
+└── README.md                            # This file
 ```
 
 ## How It Works
@@ -225,58 +229,101 @@ python src/run_full_pipeline.py \
    - Match chest X-rays to ED visits using temporal alignment (±24 hours)
    - Link patient demographics, vital signs, medications
 
-3. **Create Pseudo-Notes**
-   - Convert structured data → narrative text
-   - Example: `{age: 65, HR: 85}` → `"Patient is a 65 year old M. Vitals: HR: 85bpm..."`
-
-4. **Image Preprocessing**
+3. **Image Preprocessing**
    - Resize to 518x518 (BiomedCLIP format)
    - Normalize with ImageNet statistics
    - Extract attention regions with edge detection
 
-5. **Text Preprocessing**
-   - Tokenize with ModernBERT (8192 token context)
-   - Expand medical abbreviations
-   - Extract medical entities for RAG
+4. **Extract Clinical Features**
+   - Extract structured clinical features (vitals, demographics)
+   - Store as tensors for later narrative generation
 
-6. **RAG Enhancement**
-   - Query medical knowledge base
-   - Append relevant context to pseudo-notes
-
-7. **Create Splits**
+5. **Create Splits**
    - Train (70%), Val (15%), Test (15%)
-   - Save as pickle files to output bucket
+   - Save as .pt files (torch format) to output bucket
+
+### Phase 2: Enhanced Pseudo-Note Generation and RAG Integration
+
+1. **Load Phase 1 Outputs**
+   - Read train/val/test splits (.pt files)
+   - Load preprocessed images and clinical features
+
+2. **Generate Pseudo-Notes**
+   - Convert structured clinical data → narrative text
+   - Example: `{age: 65, HR: 85}` → `"Patient is a 65 year old M. Vitals: HR: 85bpm..."`
+   - Expand medical abbreviations (HTN → hypertension)
+
+3. **RAG Enhancement**
+   - Query medical knowledge base with FAISS
+   - Retrieve relevant medical knowledge (top-k documents)
+   - Augment pseudo-notes with medical context
+
+4. **Text Tokenization**
+   - Tokenize enhanced notes with ModernBERT (8192 token context)
+   - Generate input_ids and attention_mask tensors
+
+5. **Save Enhanced Data**
+   - Add pseudo_note, enhanced_note, enhanced_text_tokens to records
+   - Save as *_enhanced.pt files ready for model training
+
+**See [docs/PHASE2_ENHANCED_NOTES.md](docs/PHASE2_ENHANCED_NOTES.md) for detailed Phase 2 documentation**
 
 ### Expected Output
 
-After running the preprocessing pipeline, you'll find these files in your output directory (`processed/phase1_preprocess/` or `gs://bergermimiciv/processed/phase1_preprocess/`):
+After running Phase 1, you'll find these files in your output directory:
 
 ```
-processed/phase1_preprocess/
-├── train_data.pkl          # Training set (70% of data)
-├── val_data.pkl            # Validation set (15% of data)
-├── test_data.pkl           # Test set (15% of data)
-├── train_small.pkl         # Small training sample (100 records, optional)
-├── val_small.pkl           # Small validation sample (100 records, optional)
-├── test_small.pkl          # Small test sample (100 records, optional)
+processed/phase1_output/
+├── train_data.pt           # Training set (70% of data)
+├── val_data.pt             # Validation set (15% of data)
+├── test_data.pt            # Test set (15% of data)
+├── train_small.pt          # Small training sample (100 records, optional)
+├── val_small.pt            # Small validation sample (100 records, optional)
+├── test_small.pt           # Small test sample (100 records, optional)
 └── metadata.json           # Dataset metadata and configuration
 ```
 
-**Note:** Small sample files (`*_small.pkl`) are only created when using the `--create-small-samples` flag. These are perfect for quickly testing your Phase 2 model implementation without loading the full dataset.
+After running Phase 2, enhanced files are added:
 
-**Each record in the pickle files contains:**
+```
+processed/phase1_output/
+├── train_data.pt                  # Original Phase 1 output
+├── train_data_enhanced.pt         # Phase 2: With pseudo-notes + RAG
+├── val_data.pt                    # Original Phase 1 output
+├── val_data_enhanced.pt           # Phase 2: With pseudo-notes + RAG
+├── test_data.pt                   # Original Phase 1 output
+├── test_data_enhanced.pt          # Phase 2: With pseudo-notes + RAG
+└── phase2_metadata.json           # Phase 2 processing metadata
+```
+
+**Note:** Small sample files (`*_small.pt`) are only created when using the `--create-small-samples` flag in Phase 1. These are perfect for quickly testing Phase 2 without loading the full dataset.
+
+**Phase 1 record structure** (.pt files):
 ```python
 {
-    'subject_id': int,              # Patient identifier
-    'study_id': int,                # Imaging study identifier
-    'image_tensor': torch.Tensor,   # Preprocessed image (518x518x3)
-    'attention_mask': np.array,     # Attention regions from edge detection
-    'text_input_ids': List[int],    # Tokenized text (ModernBERT)
-    'text_attention_mask': List[int],  # Text attention mask
-    'enhanced_note': str,           # RAG-enhanced pseudo-note
-    'attention_segments': Dict,     # Cross-attention preparation
-    'clinical_data': Dict,          # Original clinical features
-    'labels': Dict                  # Disease labels, bboxes, severity scores
+    'subject_id': int,                  # Patient identifier
+    'study_id': int,                    # Imaging study identifier
+    'dicom_id': str,                    # DICOM image ID
+    'image': torch.Tensor,              # Preprocessed image (518x518x3)
+    'attention_regions': Dict,          # Attention maps from edge detection
+    'text_tokens': Dict,                # Original text tokens (chief complaint)
+    'clinical_features': torch.Tensor,  # Structured clinical features
+    'retrieved_knowledge': List[str],   # Pre-retrieved knowledge (Phase 1)
+    'labels': Dict                      # View position, etc.
+}
+```
+
+**Phase 2 enhanced record structure** (*_enhanced.pt files):
+```python
+{
+    # All Phase 1 fields (preserved) PLUS:
+    'pseudo_note': str,                 # Generated narrative clinical note
+    'enhanced_note': str,               # RAG-enhanced note with medical context
+    'enhanced_text_tokens': {           # Tokenized for Clinical ModernBERT
+        'input_ids': torch.Tensor,
+        'attention_mask': torch.Tensor
+    },
+    'phase2_processed': True            # Processing flag
 }
 ```
 
@@ -591,4 +638,4 @@ For questions or issues:
 ---
 
 **Last Updated**: 2025-10-28
-**Status**: Phase 1 Complete ✅ | Memory-Efficient Streaming ✅ | Stratified Splitting ✅ | Resume Capability ✅ | Small Sample Datasets ✅ | 107,949+ Records Matched ✅ | Runs on 7.5GB RAM ✅
+**Status**: Phase 1 Complete | Memory-Efficient Streaming | Stratified Splitting | Resume Capability | Small Sample Datasets | 107,949+ Records Matched | Runs on 7.5GB RAM
