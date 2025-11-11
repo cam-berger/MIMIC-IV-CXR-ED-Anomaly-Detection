@@ -141,7 +141,7 @@ class StratificationIndicesLoader:
             # Download and load batch
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp_file:
                 blob.download_to_filename(tmp_file.name)
-                records = torch.load(tmp_file.name)
+                records = torch.load(tmp_file.name, weights_only=False)
                 Path(tmp_file.name).unlink()
 
             # Extract keys
@@ -263,7 +263,7 @@ class LoadAndFlattenBatchDoFn(beam.DoFn):
 
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp_file:
             blob.download_to_filename(tmp_file.name)
-            records = torch.load(tmp_file.name)
+            records = torch.load(tmp_file.name, weights_only=False)
             Path(tmp_file.name).unlink()
 
         # Yield records with global indices
@@ -565,7 +565,7 @@ def load_batch_and_assign(batch_path: str,
 
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp_file:
         blob.download_to_filename(tmp_file.name)
-        records = torch.load(tmp_file.name)
+        records = torch.load(tmp_file.name, weights_only=False)
         Path(tmp_file.name).unlink()
 
     # Convert indices to sets for fast lookup
