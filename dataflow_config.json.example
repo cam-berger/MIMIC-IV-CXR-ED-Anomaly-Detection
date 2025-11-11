@@ -1,0 +1,39 @@
+{
+  "project_id": "YOUR_PROJECT_ID",
+  "gcs_bucket": "YOUR_BUCKET_NAME",
+  "batch_files_prefix": "preprocessed/batch_",
+  "output_prefix": "preprocessed/",
+
+  "stratification": {
+    "train_ratio": 0.7,
+    "val_ratio": 0.15,
+    "test_ratio": 0.15,
+    "random_seed": 42
+  },
+
+  "output_settings": {
+    "chunk_size": 50,
+    "create_small_samples": false,
+    "small_sample_size": 100
+  },
+
+  "dataflow": {
+    "runner": "DataflowRunner",
+    "region": "us-central1",
+    "max_num_workers": 10,
+    "machine_type": "n1-standard-4",
+    "disk_size_gb": 100
+  },
+
+  "comments": {
+    "project_id": "Your GCP project ID (e.g., 'my-project-123')",
+    "gcs_bucket": "GCS bucket name WITHOUT gs:// prefix (e.g., 'bergermimiciv')",
+    "batch_files_prefix": "Path prefix for batch files, including 'batch_' if that's the pattern",
+    "output_prefix": "Where to write output chunks (usually same directory as batches)",
+    "runner": "Use 'DataflowRunner' for cloud, 'DirectRunner' for local testing",
+    "region": "GCP region closest to your bucket (e.g., 'us-central1', 'us-east1')",
+    "max_num_workers": "Maximum parallel workers (more workers = faster but more expensive)",
+    "machine_type": "Worker VM type - n1-standard-4 recommended, n1-highmem-8 for larger batches",
+    "chunk_size": "Records per output file (50 is good for ~1GB batches with 50 records each)"
+  }
+}

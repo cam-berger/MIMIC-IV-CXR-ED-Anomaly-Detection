@@ -1,0 +1,18 @@
+# Dataflow Pipeline Requirements
+# These packages will be installed on Dataflow workers
+
+# Apache Beam with GCP support
+apache-beam[gcp]>=2.52.0
+
+# Core data processing (minimal subset of main requirements)
+numpy>=1.24.0,<2.0
+pandas>=2.0.0
+
+# Deep Learning (PyTorch)
+torch>=2.0.0
+
+# Google Cloud Storage
+google-cloud-storage>=2.10.0
+
+# Note: Keep this minimal to reduce worker startup time
+# Workers only need what's required for loading/writing PyTorch files
