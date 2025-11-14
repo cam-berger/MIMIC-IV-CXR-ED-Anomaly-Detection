@@ -17,9 +17,10 @@ HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused w
 - **Small Sample Datasets**: Automatically generate small test versions for rapid Phase 2 development
 
 ### Technical Documentation
-- **[OPUS Fixes Verification](OPUS_FIXES_VERIFICATION.md)**: Complete verification of all 5 critical issues identified and fixed
-- **[OOM Fix Summary](SESSION_OOM_FIX_SUMMARY.md)**: Detailed analysis and solution for memory management issues
-- All fixes verified and deployed to production (VM: mimic-preprocessing-20251026-092532)
+- **[OOM Solution Guide](docs/OOM_SOLUTION.md)**: Solutions for memory management and out-of-memory issues
+- **[Phase 2 Refactoring Summary](docs/PHASE2_REFACTORING_SUMMARY.md)**: Complete Phase 2 implementation details
+- **[Phase 3 Integration Guide](docs/PHASE3_INTEGRATION.md)**: Multi-modal integration and final dataset preparation
+- All fixes verified and deployed to production
 
 ## Overview
 
@@ -47,7 +48,7 @@ The pipeline links MIMIC-CXR chest X-rays with MIMIC-IV-ED emergency department 
 - **Scalable**: Successfully processes 107,949+ matched multimodal records
 - **Cloud-Native**: Optimized for Google Cloud Platform (Compute Engine, Cloud Storage)
 
-## Architecture
+## Data Pipeline Architecture
 
 ```
 MIMIC-IV-ED (Your Bucket)          MIMIC-CXR (PhysioNet's Bucket)
@@ -65,6 +66,288 @@ MIMIC-IV-ED (Your Bucket)          MIMIC-CXR (PhysioNet's Bucket)
     ├── RAG-Enhanced Context
     └── Train/Val/Test Splits
 ```
+
+## Model Architecture
+
+### Overview
+
+The Enhanced MDF-Net (Multi-Modal Deep Fusion Network) combines three complementary modalities through cross-modal attention for chest X-ray abnormality detection.
+
+### Architecture Components
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    ENHANCED MDF-NET ARCHITECTURE                 │
+└─────────────────────────────────────────────────────────────────┘
+
+INPUT MODALITIES:
+┌─────────────────┐  ┌──────────────────┐  ┌─────────────────────┐
+│  Chest X-Ray    │  │  Enhanced Text   │  │  Clinical Features  │
+│  (518×518×3)    │  │  (8192 tokens)   │  │  (Normalized Vector)│
+└────────┬────────┘  └────────┬─────────┘  └──────────┬──────────┘
+         │                    │                        │
+         ▼                    ▼                        ▼
+
+ENCODERS:
+┌─────────────────┐  ┌──────────────────┐  ┌─────────────────────┐
+│  BiomedCLIP-CXR │  │ Clinical Modern  │  │   Dense Layers      │
+│  Vision Encoder │  │  BERT Encoder    │  │  + Batch Norm       │
+│                 │  │                  │  │  + Dropout          │
+│  Pre-trained on │  │  8192 context    │  │                     │
+│  medical images │  │  Specialized for │  │  Maps to latent     │
+│                 │  │  clinical text   │  │  space              │
+│  Output: [B,D_v]│  │  Output: [B,D_t] │  │  Output: [B,D_c]    │
+└────────┬────────┘  └────────┬─────────┘  └──────────┬──────────┘
+         │                    │                        │
+         └────────────────────┴────────────────────────┘
+                              │
+                              ▼
+
+FUSION LAYER:
+┌──────────────────────────────────────────────────────────┐
+│              Cross-Modal Attention Fusion                │
+│                                                          │
+│  Vision-Text Attention:                                 │
+│  • Query: Vision features                               │
+│  • Key/Value: Text features (RAG-enhanced)              │
+│  • Captures visual-semantic alignment                   │
+│                                                          │
+│  Multi-Head Attention:                                  │
+│  • Attends to all three modalities simultaneously       │
+│  • Learns complementary feature interactions            │
+│  • Residual connections + Layer Normalization           │
+│                                                          │
+│  Feature Concatenation:                                 │
+│  • Fused = [Vision ⊕ Text ⊕ Clinical ⊕ Attention]      │
+│                                                          │
+│  Output: [B, D_fused]                                   │
+└─────────────────────────┬────────────────────────────────┘
+                          │
+                          ▼
+
+CLASSIFICATION HEAD:
+┌──────────────────────────────────────────────────────────┐
+│  Dense Layer 1: [D_fused → 512]                         │
+│  ├─ BatchNorm + ReLU + Dropout(0.3)                     │
+│                                                          │
+│  Dense Layer 2: [512 → 256]                             │
+│  ├─ BatchNorm + ReLU + Dropout(0.2)                     │
+│                                                          │
+│  Output Layer: [256 → N_classes]                        │
+│  ├─ Sigmoid activation (multi-label)                    │
+└─────────────────────────┬────────────────────────────────┘
+                          │
+                          ▼
+
+OUTPUT:
+┌──────────────────────────────────────────────────────────┐
+│  Multi-Label Abnormality Predictions                     │
+│  • Atelectasis, Cardiomegaly, Consolidation, Edema      │
+│  • Enlarged Cardiomediastinum, Fracture, Lung Lesion    │
+│  • Lung Opacity, Pleural Effusion, Pleural Other        │
+│  • Pneumonia, Pneumothorax, Support Devices             │
+│                                                          │
+│  Shape: [B, 14] (probability per abnormality)           │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Key Components
+
+#### 1. **Vision Encoder: BiomedCLIP-CXR**
+- **Architecture**: Vision Transformer (ViT) based
+- **Pre-training**: Contrastive learning on 217K chest X-ray/report pairs
+- **Input**: 518×518 RGB images (resized and normalized)
+- **Output**: 768-dimensional vision embeddings
+- **Advantages**:
+  - Specialized for chest X-ray interpretation
+  - Captures anatomical and pathological features
+  - Better performance than ImageNet-pretrained models on medical images
+
+#### 2. **Text Encoder: Clinical ModernBERT**
+- **Architecture**: Transformer-based language model
+- **Context Length**: 8192 tokens (4× longer than BERT)
+- **Input**: RAG-enhanced pseudo-notes
+  - Pseudo-notes: Generated from structured clinical data (vitals, labs, medications)
+  - RAG Enhancement: Augmented with retrieved medical knowledge (FAISS)
+- **Output**: 768-dimensional text embeddings
+- **Advantages**:
+  - Optimized for clinical terminology
+  - Long context captures complete patient presentation
+  - RAG provides relevant medical knowledge context
+
+#### 3. **Clinical Features Encoder**
+- **Input**: Normalized structured features (age, gender, vitals, acuity, pain score)
+- **Architecture**:
+  - Dense layers with batch normalization
+  - Dropout for regularization
+- **Output**: 256-dimensional clinical embeddings
+- **Purpose**: Captures objective clinical measurements
+
+#### 4. **Cross-Modal Attention Fusion**
+- **Multi-Head Attention**: Learns interactions between modalities
+  - Vision ↔ Text: Aligns visual findings with clinical descriptions
+  - Vision ↔ Clinical: Relates imaging to vital signs
+  - Text ↔ Clinical: Connects symptoms with measurements
+- **Residual Connections**: Preserves individual modality information
+- **Layer Normalization**: Stabilizes training
+- **Output**: Unified multi-modal representation
+
+#### 5. **Classification Head**
+- **Multi-label Classification**: 14 CheXpert abnormality classes
+- **Architecture**:
+  - Two fully-connected layers with decreasing dimensions
+  - Batch normalization and dropout for regularization
+- **Output**: Sigmoid probabilities for each abnormality
+
+### Model Parameters
+
+| Component | Parameters | Description |
+|-----------|------------|-------------|
+| BiomedCLIP Vision | ~87M | Pre-trained ViT encoder |
+| Clinical ModernBERT | ~149M | Pre-trained text encoder |
+| Clinical Feature Encoder | ~131K | Dense layers |
+| Cross-Modal Attention | ~2.4M | Multi-head attention |
+| Classification Head | ~394K | Dense layers |
+| **Total** | **~239M** | End-to-end trainable |
+
+### Training Strategy
+
+1. **Stage 1: Feature Extraction**
+   - Freeze BiomedCLIP and ModernBERT encoders
+   - Train fusion layer and classification head
+   - Learn optimal modality combination
+
+2. **Stage 2: Fine-tuning**
+   - Unfreeze all layers
+   - Fine-tune with lower learning rate
+   - Adapt pre-trained models to ED abnormality detection
+
+## Loss Functions
+
+### Primary Loss: Weighted Binary Cross-Entropy (BCE)
+
+Multi-label abnormality detection uses weighted BCE to handle class imbalance:
+
+```python
+def weighted_bce_loss(predictions, targets, pos_weights):
+    """
+    Weighted Binary Cross-Entropy Loss for multi-label classification
+
+    Args:
+        predictions: [B, N_classes] - Sigmoid probabilities
+        targets: [B, N_classes] - Binary ground truth
+        pos_weights: [N_classes] - Weights for positive class per abnormality
+
+    Returns:
+        Scalar loss value
+    """
+    # BCE with positive class weighting
+    loss = - (pos_weights * targets * log(predictions) +
+              (1 - targets) * log(1 - predictions))
+
+    return loss.mean()
+```
+
+**Positive Weights Calculation:**
+```python
+# For each abnormality class:
+pos_weight[i] = n_negative_samples[i] / n_positive_samples[i]
+
+# Example weights (based on CheXpert distribution):
+{
+    'No Finding': 1.0,           # Most common
+    'Atelectasis': 2.8,
+    'Cardiomegaly': 3.5,
+    'Consolidation': 8.2,
+    'Edema': 4.1,
+    'Enlarged Cardiomediastinum': 12.3,
+    'Fracture': 45.7,            # Rare
+    'Lung Lesion': 67.4,         # Very rare
+    'Lung Opacity': 1.9,
+    'Pleural Effusion': 3.2,
+    'Pleural Other': 89.3,       # Very rare
+    'Pneumonia': 15.6,
+    'Pneumothorax': 21.4,
+    'Support Devices': 1.6
+}
+```
+
+### Auxiliary Loss: Focal Loss (Optional)
+
+For extremely imbalanced classes (Lung Lesion, Pleural Other), focal loss focuses training on hard examples:
+
+```python
+def focal_loss(predictions, targets, alpha=0.25, gamma=2.0):
+    """
+    Focal Loss for handling extreme class imbalance
+
+    Args:
+        predictions: [B, N_classes] - Sigmoid probabilities
+        targets: [B, N_classes] - Binary ground truth
+        alpha: Weighting factor for positive class
+        gamma: Focusing parameter (higher = more focus on hard examples)
+
+    Returns:
+        Scalar loss value
+    """
+    bce = - (targets * log(predictions) + (1 - targets) * log(1 - predictions))
+
+    # Compute focal weight
+    p_t = predictions * targets + (1 - predictions) * (1 - targets)
+    focal_weight = (1 - p_t) ** gamma
+
+    # Apply alpha weighting
+    alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+
+    loss = alpha_t * focal_weight * bce
+
+    return loss.mean()
+```
+
+### Combined Loss Function
+
+```python
+def combined_loss(predictions, targets, pos_weights,
+                 lambda_bce=0.7, lambda_focal=0.3):
+    """
+    Combined loss for robust multi-label classification
+
+    Args:
+        predictions: Model predictions
+        targets: Ground truth labels
+        pos_weights: Class weights for BCE
+        lambda_bce: Weight for BCE loss
+        lambda_focal: Weight for focal loss
+
+    Returns:
+        Combined loss value
+    """
+    bce = weighted_bce_loss(predictions, targets, pos_weights)
+    focal = focal_loss(predictions, targets)
+
+    return lambda_bce * bce + lambda_focal * focal
+```
+
+### Loss Components Summary
+
+| Loss Component | Purpose | Weight |
+|----------------|---------|--------|
+| **Weighted BCE** | Handle class imbalance across all abnormalities | 0.7 |
+| **Focal Loss** | Focus on hard examples and rare classes | 0.3 |
+
+### Training Metrics
+
+In addition to loss, we monitor:
+
+**Classification Metrics:**
+- **AUROC** (Area Under ROC Curve): Primary metric for each abnormality
+- **AUPRC** (Area Under Precision-Recall Curve): For imbalanced classes
+- **F1-Score**: Balance between precision and recall
+- **Sensitivity/Specificity**: Clinical relevance metrics
+
+**Calibration Metrics:**
+- **Expected Calibration Error (ECE)**: Prediction reliability
+- **Brier Score**: Probabilistic prediction accuracy
 
 ## Datasets Required
 
@@ -206,14 +489,14 @@ python src/run_full_pipeline.py \
 │   ├── deploy_gcp.sh                    # Automated GCP VM deployment
 │   └── vm_startup.sh                    # VM initialization script
 ├── docs/
-│   ├── GCP_DEPLOYMENT.md                # Complete GCP deployment guide
-│   ├── GCS_SETUP.md                     # Google Cloud setup guide
-│   ├── ARCHITECTURE.md                  # System architecture
-│   ├── IMAGE_DOWNLOAD_GUIDE.md          # MIMIC-CXR download guide
-│   └── PHASE2_ENHANCED_NOTES.md         # Phase 2 documentation
-├── LOCAL_TESTING.md                     # Local testing guide
-├── DEPLOYMENT_QUICKSTART.md             # Quick deployment reference
-├── PHASE2_REFACTORING_SUMMARY.md        # Phase 2 refactoring details
+│   ├── DATAFLOW_SETUP.md                # Google Cloud Dataflow setup
+│   ├── DEPLOYMENT_QUICKSTART.md         # Quick deployment reference
+│   ├── LOCAL_TESTING.md                 # Local testing guide
+│   ├── OOM_SOLUTION.md                  # Out-of-memory solutions
+│   ├── PHASE2_ENHANCED_NOTES.md         # Phase 2 documentation
+│   ├── PHASE2_REFACTORING_SUMMARY.md    # Phase 2 refactoring details
+│   ├── PHASE3_INTEGRATION.md            # Phase 3 integration guide
+│   └── QUICK_START.md                   # Quick start guide
 └── README.md                            # This file
 ```
 
