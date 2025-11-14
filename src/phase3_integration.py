@@ -1,778 +1,624 @@
 """
-Phase 3: Integration
-Creates patient-level folder structure and integrates all modalities with comprehensive clinical data
+Phase 3: Multi-Modal Integration and Final Dataset Preparation
+Integrates Phase 2 enhanced outputs and prepares final training-ready datasets
+
+Takes Phase 2 enhanced data and:
+- Validates all modalities are present and properly formatted
+- Creates comprehensive cross-modal integration
+- Generates final training-ready datasets
+- Produces detailed statistics and quality metrics
+- Prepares data for model training with proper batching
+
+Supports both GCS and local file systems
 """
 
 import os
 import json
 import pandas as pd
+import numpy as np
+import torch
 from pathlib import Path
-from typing import Dict, List, Optional, Any
-from loguru import logger
+from typing import Dict, List, Tuple, Optional, Any
+from dataclasses import dataclass
+import logging
+import argparse
 from tqdm import tqdm
 from datetime import datetime
+from collections import defaultdict
 
-from .config_manager import get_config
-from .utils import S3Handler
+# Import from phase1 for consistency
+from phase1_preprocess_streaming import DataConfig, GCSHelper
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
-class DataIntegrator:
-    """Integrate all modalities and clinical data into patient-level folders"""
-    
+@dataclass
+class ValidationStats:
+    """Statistics for dataset validation"""
+    total_records: int = 0
+    valid_records: int = 0
+    missing_images: int = 0
+    missing_clinical: int = 0
+    missing_text: int = 0
+    missing_labels: int = 0
+    avg_text_length: float = 0.0
+    avg_enhanced_text_length: float = 0.0
+    view_position_counts: Dict[str, int] = None
+
+    def __post_init__(self):
+        if self.view_position_counts is None:
+            self.view_position_counts = {}
+
+
+class DataQualityValidator:
+    """
+    Validate data quality and completeness across all modalities
+    """
+
     def __init__(self):
-        """Initialize Data Integrator"""
-        self.config = get_config()
-        self.s3 = S3Handler(
-            region=self.config.get('aws.region'),
-            profile=self.config.get('aws.profile')
-        )
-        self.copy_images = self.config.get(
-            'preprocessing.phase3.copy_images', True
-        )
-        self.save_json = self.config.get(
-            'preprocessing.phase3.save_json', True
-        )
-        self.save_csv = self.config.get(
-            'preprocessing.phase3.save_csv', True
-        )
-        
-        logger.info("Data Integrator initialized for comprehensive data")
-    
-    def create_patient_folder_structure(
-        self,
-        bucket: str,
-        subject_id: int
-    ):
-        """
-        Create comprehensive folder structure for a patient in S3
-        
-        Args:
-            bucket: S3 bucket name
-            subject_id: Patient ID
-        """
-        prefix = f"processed/patient_{subject_id}/"
-        
-        # Create comprehensive folder structure
-        folders = [
-            'ED/',                    # ED visit data
-            'Hosp/',                  # Hospital admission data
-            'Labs/',                  # Lab results
-            'Medications/',           # Medication data
-            'Diagnoses/',            # Diagnosis codes
-            'Procedures/',           # Procedure codes
-            'Vitals/',               # Vital signs
-            'CXR-JPG/',              # Chest X-ray images
-            'Reports/',              # Radiology reports
-            'metadata/',             # Integrated metadata
-            'timeline/'              # Time-based view of data
+        """Initialize Data Quality Validator"""
+        self.required_fields = [
+            'subject_id', 'study_id', 'dicom_id',
+            'image', 'clinical_features', 'labels'
         ]
-        
-        for folder in folders:
-            key = f"{prefix}{folder}.placeholder"
-            try:
-                self.s3.s3_client.put_object(
-                    Bucket=bucket,
-                    Key=key,
-                    Body=b''
-                )
-            except Exception as e:
-                logger.warning(f"Could not create folder {folder}: {str(e)}")
-    
-    def save_patient_metadata(
-        self,
-        bucket: str,
-        subject_id: int,
-        patient_records: List[Dict]
-    ):
+        self.phase2_fields = [
+            'pseudo_note', 'enhanced_note', 'enhanced_text_tokens'
+        ]
+
+    def validate_record(self, record: Dict) -> Tuple[bool, List[str]]:
         """
-        Save comprehensive patient metadata as JSON
-        
+        Validate a single record for completeness and quality
+
         Args:
-            bucket: S3 bucket name
-            subject_id: Patient ID
-            patient_records: List of patient records with clinical data
+            record: Record to validate
+
+        Returns:
+            Tuple of (is_valid, list of issues)
         """
-        prefix = f"processed/patient_{subject_id}/"
-        
-        try:
-            # Save complete records with all nested data
-            if self.save_json:
-                key = f"{prefix}metadata/patient_data_complete.json"
-                
-                # Convert to JSON-serializable format
-                serializable_records = self._make_serializable(patient_records)
-                
-                # Convert to JSON with nice formatting
-                json_data = json.dumps(
-                    serializable_records, 
-                    indent=2, 
-                    default=str,
-                    sort_keys=True
-                )
-                
-                # Upload to S3
-                self.s3.s3_client.put_object(
-                    Bucket=bucket,
-                    Key=key,
-                    Body=json_data.encode('utf-8')
-                )
-                
-                logger.debug(f"Saved complete metadata for patient {subject_id}")
-            
-            # Also save individual data components
-            self._save_data_components(bucket, subject_id, patient_records)
-            
-        except Exception as e:
-            logger.error(f"Error saving metadata for patient {subject_id}: {str(e)}")
-            raise
-    
-    def _make_serializable(self, obj: Any) -> Any:
-        """Recursively convert objects to JSON-serializable format"""
-        if isinstance(obj, dict):
-            return {k: self._make_serializable(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [self._make_serializable(item) for item in obj]
-        elif isinstance(obj, (pd.Timestamp, pd.DatetimeTZDtype, datetime)):
-            return str(obj)
-        elif pd.isna(obj):
-            return None
-        elif hasattr(obj, 'item'):  # numpy types
-            return obj.item()
+        issues = []
+
+        # Check required Phase 1 fields
+        for field in self.required_fields:
+            if field not in record or record[field] is None:
+                issues.append(f"Missing required field: {field}")
+
+        # Check Phase 2 fields
+        if not record.get('phase2_processed'):
+            issues.append("Record not processed by Phase 2")
+
+        for field in self.phase2_fields:
+            if field not in record or record[field] is None:
+                issues.append(f"Missing Phase 2 field: {field}")
+
+        # Validate image tensor
+        if 'image' in record and record['image'] is not None:
+            img = record['image']
+            if not torch.is_tensor(img):
+                issues.append("Image is not a tensor")
+            elif img.shape != torch.Size([3, 518, 518]):
+                issues.append(f"Invalid image shape: {img.shape}")
+
+        # Validate clinical features
+        if 'clinical_features' in record and record['clinical_features'] is not None:
+            cf = record['clinical_features']
+            if not torch.is_tensor(cf):
+                issues.append("Clinical features is not a tensor")
+
+        # Validate enhanced text tokens
+        if 'enhanced_text_tokens' in record and record['enhanced_text_tokens'] is not None:
+            tokens = record['enhanced_text_tokens']
+            if not isinstance(tokens, dict):
+                issues.append("Enhanced text tokens is not a dict")
+            elif 'input_ids' not in tokens or 'attention_mask' not in tokens:
+                issues.append("Enhanced text tokens missing input_ids or attention_mask")
+
+        is_valid = len(issues) == 0
+        return is_valid, issues
+
+    def validate_split(self, records: List[Dict], split_name: str) -> ValidationStats:
+        """
+        Validate an entire data split
+
+        Args:
+            records: List of records to validate
+            split_name: Name of the split (train/val/test)
+
+        Returns:
+            ValidationStats with comprehensive statistics
+        """
+        stats = ValidationStats()
+        stats.total_records = len(records)
+        stats.view_position_counts = defaultdict(int)
+
+        text_lengths = []
+        enhanced_text_lengths = []
+
+        for record in tqdm(records, desc=f"Validating {split_name}"):
+            is_valid, issues = self.validate_record(record)
+
+            if is_valid:
+                stats.valid_records += 1
+            else:
+                # Count specific issues
+                if any('image' in issue for issue in issues):
+                    stats.missing_images += 1
+                if any('clinical' in issue for issue in issues):
+                    stats.missing_clinical += 1
+                if any('text' in issue for issue in issues):
+                    stats.missing_text += 1
+                if any('labels' in issue for issue in issues):
+                    stats.missing_labels += 1
+
+            # Collect text length statistics
+            if 'pseudo_note' in record and record['pseudo_note']:
+                text_lengths.append(len(record['pseudo_note']))
+
+            if 'enhanced_note' in record and record['enhanced_note']:
+                enhanced_text_lengths.append(len(record['enhanced_note']))
+
+            # Count view positions
+            if 'labels' in record and 'view_position' in record['labels']:
+                view_pos = record['labels']['view_position']
+                stats.view_position_counts[view_pos] += 1
+
+        # Calculate averages
+        if text_lengths:
+            stats.avg_text_length = np.mean(text_lengths)
+        if enhanced_text_lengths:
+            stats.avg_enhanced_text_length = np.mean(enhanced_text_lengths)
+
+        return stats
+
+
+class MultiModalIntegrator:
+    """
+    Integrate all modalities into final training-ready format
+    Combines vision, text, and clinical features with proper alignment
+    """
+
+    def __init__(self, config: DataConfig):
+        """
+        Initialize Multi-Modal Integrator
+
+        Args:
+            config: DataConfig with processing settings
+        """
+        self.config = config
+
+    def integrate_record(self, record: Dict) -> Dict:
+        """
+        Integrate all modalities for a single record
+        Creates final model-ready format
+
+        Args:
+            record: Enhanced record from Phase 2
+
+        Returns:
+            Integrated record ready for model training
+        """
+        integrated = {
+            # Identifiers
+            'subject_id': record['subject_id'],
+            'study_id': record['study_id'],
+            'dicom_id': record['dicom_id'],
+
+            # Vision modality (BiomedCLIP input)
+            'image': record['image'],  # [3, 518, 518]
+            'attention_regions': record.get('attention_regions', None),
+
+            # Text modality (Clinical ModernBERT input)
+            'text_input_ids': record['enhanced_text_tokens']['input_ids'],
+            'text_attention_mask': record['enhanced_text_tokens']['attention_mask'],
+            'pseudo_note': record['pseudo_note'],  # Raw text for analysis
+            'enhanced_note': record['enhanced_note'],  # Raw enhanced text
+
+            # Clinical features (structured data)
+            'clinical_features': record['clinical_features'],
+
+            # Labels and metadata
+            'labels': record['labels'],
+            'view_position': record['labels'].get('view_position', 'UNKNOWN'),
+
+            # RAG knowledge
+            'retrieved_knowledge': record.get('retrieved_knowledge', []),
+
+            # Processing flags
+            'phase1_processed': True,
+            'phase2_processed': record.get('phase2_processed', False),
+            'phase3_integrated': True
+        }
+
+        return integrated
+
+    def create_batch_indices(self, num_records: int, batch_size: int = 32) -> List[Tuple[int, int]]:
+        """
+        Create batch indices for efficient data loading
+
+        Args:
+            num_records: Total number of records
+            batch_size: Batch size for training
+
+        Returns:
+            List of (start_idx, end_idx) tuples
+        """
+        indices = []
+        for i in range(0, num_records, batch_size):
+            end_idx = min(i + batch_size, num_records)
+            indices.append((i, end_idx))
+        return indices
+
+
+class Phase3Processor:
+    """
+    Phase 3 Processor: Multi-Modal Integration and Final Dataset Preparation
+    Integrates Phase 2 outputs into final training-ready datasets
+    """
+
+    def __init__(self, config: DataConfig):
+        """
+        Initialize Phase 3 Processor
+
+        Args:
+            config: DataConfig from phase1/phase2
+        """
+        self.config = config
+        self.gcs_helper = GCSHelper(config)
+
+        # Initialize components
+        self.validator = DataQualityValidator()
+        self.integrator = MultiModalIntegrator(config)
+
+        logger.info("Phase 3 Processor initialized")
+        logger.info(f"  Mode: {'GCS' if config.use_gcs else 'Local'}")
+        logger.info(f"  Input path: {config.output_path}")
+
+    def load_enhanced_split(self, split_name: str, use_small_sample: bool = False) -> List[Dict]:
+        """
+        Load Phase 2 enhanced data for a split
+
+        Args:
+            split_name: 'train', 'val', or 'test'
+            use_small_sample: Load small sample files
+
+        Returns:
+            List of enhanced records from Phase 2
+        """
+        # Construct input file path
+        if use_small_sample:
+            filename = f"{split_name}_small_enhanced.pt"
         else:
-            return obj
-    
-    def _save_data_components(
-        self,
-        bucket: str,
-        subject_id: int,
-        patient_records: List[Dict]
-    ):
-        """Save individual data components in separate files"""
-        prefix = f"processed/patient_{subject_id}/"
-        
+            filename = f"{split_name}_data_enhanced.pt"
+
+        if self.config.use_gcs:
+            input_path = f"{self.config.output_path}/{filename}"
+        else:
+            input_path = Path(self.config.output_path).expanduser() / filename
+            input_path = str(input_path)
+
+        logger.info(f"Loading enhanced {split_name} split from: {input_path}")
+
         try:
-            # Extract and save lab results
-            lab_data = []
-            for record in patient_records:
-                if 'lab_results' in record and record['lab_results']:
-                    lab_entry = {
-                        'study_datetime': record['study_datetime'],
-                        'stay_id': record['stay_id'],
-                        **record['lab_results']
-                    }
-                    lab_data.append(lab_entry)
-            
-            if lab_data:
-                # Save important labs as CSV
-                important_labs = []
-                for entry in lab_data:
-                    if 'important_labs' in entry:
-                        for lab_name, lab_info in entry['important_labs'].items():
-                            important_labs.append({
-                                'study_datetime': entry['study_datetime'],
-                                'lab_name': lab_name,
-                                'value': lab_info.get('value'),
-                                'valuenum': lab_info.get('valuenum'),
-                                'charttime': lab_info.get('charttime'),
-                                'flag': lab_info.get('flag')
-                            })
-                
-                if important_labs:
-                    labs_df = pd.DataFrame(important_labs)
-                    labs_key = f"{prefix}Labs/important_labs.csv"
-                    self.s3.write_csv(labs_df, bucket, labs_key)
-            
-            # Extract and save medications
-            med_data = []
-            for record in patient_records:
-                if 'medications' in record and record['medications']:
-                    if record['medications'].get('medications'):
-                        for med in record['medications']['medications']:
-                            med_entry = {
-                                'study_datetime': record['study_datetime'],
-                                'stay_id': record['stay_id'],
-                                **med
-                            }
-                            med_data.append(med_entry)
-            
-            if med_data:
-                meds_df = pd.DataFrame(med_data)
-                meds_key = f"{prefix}Medications/medications.csv"
-                self.s3.write_csv(meds_df, bucket, meds_key)
-            
-            # Extract and save diagnoses
-            diag_data = []
-            for record in patient_records:
-                if 'diagnoses' in record and record['diagnoses']:
-                    if record['diagnoses'].get('all_diagnoses'):
-                        for diag in record['diagnoses']['all_diagnoses']:
-                            diag_entry = {
-                                'study_datetime': record['study_datetime'],
-                                'stay_id': record['stay_id'],
-                                **diag
-                            }
-                            diag_data.append(diag_entry)
-            
-            if diag_data:
-                diag_df = pd.DataFrame(diag_data)
-                diag_key = f"{prefix}Diagnoses/diagnoses.csv"
-                self.s3.write_csv(diag_df, bucket, diag_key)
-            
-            # Extract and save vital signs
-            vitals_data = []
-            for record in patient_records:
-                if 'vital_signs' in record and record['vital_signs']:
-                    vitals_entry = {
-                        'study_datetime': record['study_datetime'],
-                        'stay_id': record['stay_id'],
-                        **{k: v for k, v in record['vital_signs'].items() 
-                           if k not in ['note', 'error']}
-                    }
-                    vitals_data.append(vitals_entry)
-            
-            if vitals_data:
-                vitals_df = pd.DataFrame(vitals_data)
-                vitals_key = f"{prefix}Vitals/vital_signs.csv"
-                self.s3.write_csv(vitals_df, bucket, vitals_key)
-            
+            records = self.gcs_helper.read_torch(input_path)
+            logger.info(f"Loaded {len(records)} enhanced records from {split_name} split")
+            return records
         except Exception as e:
-            logger.error(f"Error saving data components for patient {subject_id}: {str(e)}")
-    
-    def create_patient_timeline(
-        self,
-        bucket: str,
-        subject_id: int,
-        patient_records: List[Dict]
-    ):
+            logger.error(f"Error loading enhanced {split_name} split: {e}")
+            raise
+
+    def process_split(self, split_name: str, use_small_sample: bool = False) -> Tuple[List[Dict], ValidationStats]:
         """
-        Create a timeline view of patient data
-        
+        Process and validate a single split
+
         Args:
-            bucket: S3 bucket name
-            subject_id: Patient ID
-            patient_records: List of patient records
+            split_name: 'train', 'val', or 'test'
+            use_small_sample: Use small sample files
+
+        Returns:
+            Tuple of (integrated_records, validation_stats)
         """
-        prefix = f"processed/patient_{subject_id}/"
-        
-        try:
-            timeline = []
-            
-            for record in patient_records:
-                study_dt = pd.to_datetime(record['study_datetime'])
-                
-                # Add CXR event
-                timeline.append({
-                    'datetime': str(study_dt),
-                    'event_type': 'CXR',
-                    'description': f"Chest X-ray ({record.get('ViewPosition', 'Unknown view')})",
-                    'stay_id': record.get('stay_id'),
-                    'hadm_id': record.get('hadm_id')
-                })
-                
-                # Add lab events
-                if record.get('lab_results', {}).get('most_recent_charttime'):
-                    timeline.append({
-                        'datetime': record['lab_results']['most_recent_charttime'],
-                        'event_type': 'Labs',
-                        'description': f"{record['lab_results'].get('lab_count', 0)} lab results",
-                        'stay_id': record.get('stay_id'),
-                        'abnormal_count': record['lab_results'].get('abnormal_count', 0)
-                    })
-                
-                # Add medication events
-                if record.get('medications', {}).get('medications'):
-                    timeline.append({
-                        'datetime': str(study_dt),
-                        'event_type': 'Medications',
-                        'description': f"{record['medications'].get('medication_count', 0)} medications active",
-                        'stay_id': record.get('stay_id'),
-                        'has_antibiotics': record['medications'].get('has_antibiotics', False)
-                    })
-            
-            # Sort timeline
-            timeline_df = pd.DataFrame(timeline)
-            if not timeline_df.empty:
-                timeline_df['datetime'] = pd.to_datetime(timeline_df['datetime'])
-                timeline_df = timeline_df.sort_values('datetime')
-                
-                # Save timeline
-                timeline_key = f"{prefix}timeline/patient_timeline.csv"
-                self.s3.write_csv(timeline_df, bucket, timeline_key)
-                
-                logger.debug(f"Created timeline for patient {subject_id}")
-            
-        except Exception as e:
-            logger.error(f"Error creating timeline for patient {subject_id}: {str(e)}")
-    
-    def save_patient_summary(
-        self,
-        bucket: str,
-        subject_id: int,
-        patient_records: List[Dict]
-    ):
+        # Load enhanced records from Phase 2
+        enhanced_records = self.load_enhanced_split(split_name, use_small_sample)
+
+        # Validate data quality
+        logger.info(f"Validating {split_name} split...")
+        validation_stats = self.validator.validate_split(enhanced_records, split_name)
+
+        # Log validation results
+        self._log_validation_stats(split_name, validation_stats)
+
+        # Integrate modalities
+        logger.info(f"Integrating modalities for {split_name} split...")
+        integrated_records = []
+
+        for record in tqdm(enhanced_records, desc=f"Integrating {split_name}"):
+            is_valid, issues = self.validator.validate_record(record)
+
+            if is_valid:
+                integrated = self.integrator.integrate_record(record)
+                integrated_records.append(integrated)
+            else:
+                logger.debug(f"Skipping invalid record {record.get('dicom_id')}: {issues}")
+
+        logger.info(f"Integrated {len(integrated_records)}/{len(enhanced_records)} records")
+
+        return integrated_records, validation_stats
+
+    def process_all_splits(self, use_small_sample: bool = False) -> Dict[str, Any]:
         """
-        Create and save a patient summary
-        
+        Process all splits and create final datasets
+
         Args:
-            bucket: S3 bucket name
-            subject_id: Patient ID
-            patient_records: List of patient records
+            use_small_sample: Use small sample files for testing
+
+        Returns:
+            Dictionary with processing statistics
         """
-        prefix = f"processed/patient_{subject_id}/"
-        
-        try:
-            # Calculate summary statistics
-            summary = {
-                'subject_id': int(subject_id),
-                'total_cxrs': len(patient_records),
-                'total_stays': len(set(r['stay_id'] for r in patient_records if r.get('stay_id'))),
-                'total_admissions': len(set(r['hadm_id'] for r in patient_records if r.get('hadm_id'))),
-                'date_range': {
-                    'first_cxr': min(r['study_datetime'] for r in patient_records),
-                    'last_cxr': max(r['study_datetime'] for r in patient_records)
-                },
-                'data_availability': {
-                    'has_clinical': any(r.get('clinical_features') for r in patient_records),
-                    'has_labs': any(r.get('lab_results', {}).get('labs_available') for r in patient_records),
-                    'has_medications': any(r.get('medications', {}).get('medications_available') for r in patient_records),
-                    'has_diagnoses': any(r.get('diagnoses', {}).get('diagnoses_available') for r in patient_records),
-                    'has_procedures': any(r.get('procedures', {}).get('procedures_available') for r in patient_records)
-                },
-                'statistics': {
-                    'total_lab_results': sum(r.get('lab_results', {}).get('lab_count', 0) for r in patient_records),
-                    'total_medications': sum(r.get('medications', {}).get('unique_medications', 0) for r in patient_records),
-                    'total_diagnoses': sum(r.get('diagnoses', {}).get('diagnosis_count', 0) for r in patient_records),
-                    'total_procedures': sum(r.get('procedures', {}).get('procedure_count', 0) for r in patient_records)
-                }
-            }
-            
-            # Add demographics if available
-            for record in patient_records:
-                if record.get('clinical_features'):
-                    cf = record['clinical_features']
-                    summary['demographics'] = {
-                        'age': cf.get('age'),
-                        'gender': cf.get('gender')
-                    }
-                    break
-            
-            # Save summary
-            summary_key = f"{prefix}metadata/patient_summary.json"
-            self.s3.s3_client.put_object(
-                Bucket=bucket,
-                Key=summary_key,
-                Body=json.dumps(summary, indent=2, default=str).encode('utf-8')
-            )
-            
-            logger.debug(f"Saved summary for patient {subject_id}")
-            
-        except Exception as e:
-            logger.error(f"Error saving summary for patient {subject_id}: {str(e)}")
-    
-    def copy_cxr_images(
-        self,
-        subject_id: int,
-        patient_records: List[Dict],
-        source_bucket: str,
-        dest_bucket: str
-    ):
-        """
-        Copy CXR images to patient folder
-        
-        Args:
-            subject_id: Patient ID
-            patient_records: List of patient records
-            source_bucket: Source S3 bucket (MIMIC)
-            dest_bucket: Destination S3 bucket
-        """
-        images_copied = 0
-        images_failed = 0
-        
-        for record in patient_records:
-            dicom_id = None
+        logger.info("=" * 60)
+        logger.info("Phase 3: Multi-Modal Integration")
+        logger.info("=" * 60)
+
+        splits = ['train', 'val', 'test']
+        all_stats = {}
+
+        for split_name in splits:
+            logger.info(f"\nProcessing {split_name} split...")
+
             try:
-                study_id = record['study_id']
-                dicom_id = record['dicom_id']
-                
-                # Construct source path
-                p_dir = f"p{str(subject_id)[:2]}"
-                source_key = (
-                    f"mimic-cxr-jpg/2.0.0/files/"
-                    f"{p_dir}/p{subject_id}/s{study_id}/{dicom_id}.jpg"
+                # Process and validate split
+                integrated_records, validation_stats = self.process_split(
+                    split_name, use_small_sample
                 )
-                
-                # Construct destination path with metadata
-                view = record.get('ViewPosition', 'unknown').replace(' ', '_')
-                dest_key = (
-                    f"processed/patient_{subject_id}/"
-                    f"CXR-JPG/s{study_id}_{dicom_id}_{view}.jpg"
-                )
-                
-                # Check if source exists
-                if not self.s3.object_exists(source_bucket, source_key):
-                    logger.warning(f"Source image not found: {source_key}")
-                    images_failed += 1
-                    continue
-                
-                # Copy image
-                self.s3.copy_object(
-                    source_bucket,
-                    source_key,
-                    dest_bucket,
-                    dest_key
-                )
-                
-                images_copied += 1
-                
+
+                # Save integrated records
+                if use_small_sample:
+                    output_filename = f"{split_name}_small_final.pt"
+                else:
+                    output_filename = f"{split_name}_final.pt"
+
+                if self.config.use_gcs:
+                    output_path = f"{self.config.output_path}/{output_filename}"
+                else:
+                    output_dir = Path(self.config.output_path).expanduser()
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    output_path = output_dir / output_filename
+                    output_path = str(output_path)
+
+                logger.info(f"Saving integrated {split_name} split to: {output_path}")
+                self.gcs_helper.write_torch(integrated_records, output_path)
+
+                # Store stats
+                all_stats[split_name] = {
+                    'total_records': validation_stats.total_records,
+                    'valid_records': validation_stats.valid_records,
+                    'validation_rate': validation_stats.valid_records / validation_stats.total_records if validation_stats.total_records > 0 else 0,
+                    'avg_text_length': validation_stats.avg_text_length,
+                    'avg_enhanced_text_length': validation_stats.avg_enhanced_text_length,
+                    'view_position_counts': dict(validation_stats.view_position_counts)
+                }
+
+                # Log sample record
+                if integrated_records:
+                    self._log_sample_record(split_name, integrated_records[0])
+
             except Exception as e:
-                logger.error(f"Error copying image {dicom_id if dicom_id else 'unknown'}: {str(e)}")
-                images_failed += 1
+                logger.error(f"Error processing {split_name} split: {e}")
                 continue
-        
-        logger.info(f"Patient {subject_id}: Copied {images_copied} images, {images_failed} failed")
-    
-    def process_patient(
-        self,
-        subject_id: int,
-        patient_records: List[Dict]
-    ):
+
+        logger.info("=" * 60)
+        logger.info("Phase 3 Complete!")
+        logger.info("=" * 60)
+
+        return all_stats
+
+    def save_final_metadata(self, all_stats: Dict[str, Any]):
         """
-        Process and integrate comprehensive data for a single patient
-        
+        Save comprehensive metadata for the final integrated datasets
+
         Args:
-            subject_id: Patient ID
-            patient_records: List of records for this patient
+            all_stats: Statistics from all splits
         """
-        output_bucket = self.config.get('aws.s3.output_bucket')
-        mimic_bucket = self.config.get('aws.s3.mimic_bucket')
-        
-        logger.debug(f"Processing patient {subject_id} with {len(patient_records)} records")
-        
-        try:
-            # Create comprehensive folder structure
-            self.create_patient_folder_structure(output_bucket, subject_id)
-            
-            # Save complete metadata
-            self.save_patient_metadata(output_bucket, subject_id, patient_records)
-            
-            # Create patient summary
-            self.save_patient_summary(output_bucket, subject_id, patient_records)
-            
-            # Create timeline view
-            self.create_patient_timeline(output_bucket, subject_id, patient_records)
-            
-            # Save as CSV if requested
-            if self.save_csv:
-                patient_df = pd.DataFrame(patient_records)
-                flattened_df = self._flatten_for_csv(patient_df)
-                csv_key = f"processed/patient_{subject_id}/metadata/patient_data_flat.csv"
-                self.s3.write_csv(flattened_df, output_bucket, csv_key)
-            
-            # Copy images if enabled
-            if self.copy_images:
-                self.copy_cxr_images(
-                    subject_id,
-                    patient_records,
-                    mimic_bucket,
-                    output_bucket
-                )
-            
-            logger.debug(f"Successfully processed patient {subject_id}")
-            
-        except Exception as e:
-            logger.error(f"Error processing patient {subject_id}: {str(e)}")
-            raise
-    
-    def create_master_index(
-        self,
-        all_records: List[Dict]
-    ):
-        """
-        Create comprehensive master index of all patients and records
-        
-        Args:
-            all_records: List of all patient records
-        """
-        output_bucket = self.config.get('aws.s3.output_bucket')
-        
-        try:
-            # Convert to DataFrame for analysis
-            df = pd.DataFrame(all_records)
-            
-            # Create comprehensive summary statistics
-            summary = {
-                'processing_info': {
-                    'processing_date': pd.Timestamp.now().isoformat(),
-                    'total_records': len(all_records),
-                    'total_patients': df['subject_id'].nunique(),
-                    'total_stays': df['stay_id'].nunique(),
-                    'total_admissions': df['hadm_id'].nunique() if 'hadm_id' in df else 0
+        metadata = {
+            'phase': 3,
+            'timestamp': datetime.now().isoformat(),
+            'description': 'Multi-modal integrated datasets ready for model training',
+            'splits': all_stats,
+            'config': {
+                'max_text_length': self.config.max_text_length,
+                'image_size': self.config.image_size,
+                'top_k_retrieval': self.config.top_k_retrieval
+            },
+            'modalities': {
+                'vision': {
+                    'encoder': 'BiomedCLIP-CXR',
+                    'image_size': self.config.image_size,
+                    'format': 'tensor [3, 518, 518]'
                 },
-                'data_completeness': {
-                    'records_with_clinical': sum(1 for r in all_records if r.get('clinical_features')),
-                    'records_with_labs': sum(1 for r in all_records if r.get('lab_results', {}).get('labs_available')),
-                    'records_with_medications': sum(1 for r in all_records if r.get('medications', {}).get('medications_available')),
-                    'records_with_diagnoses': sum(1 for r in all_records if r.get('diagnoses', {}).get('diagnoses_available')),
-                    'records_with_procedures': sum(1 for r in all_records if r.get('procedures', {}).get('procedures_available'))
+                'text': {
+                    'encoder': 'Clinical ModernBERT',
+                    'max_length': self.config.max_text_length,
+                    'format': 'tokenized (input_ids, attention_mask)'
                 },
-                'aggregate_statistics': {
-                    'total_lab_results': sum(r.get('lab_results', {}).get('lab_count', 0) for r in all_records),
-                    'total_unique_labs': len(set(
-                        lab_name 
-                        for r in all_records 
-                        if r.get('lab_results', {}).get('important_labs')
-                        for lab_name in r['lab_results']['important_labs'].keys()
-                    )),
-                    'total_medications': sum(r.get('medications', {}).get('medication_count', 0) for r in all_records),
-                    'total_diagnoses': sum(r.get('diagnoses', {}).get('diagnosis_count', 0) for r in all_records),
-                    'patients_with_antibiotics': sum(
-                        1 for _, patient_df in df.groupby('subject_id')
-                        if any(r.get('medications', {}).get('has_antibiotics') for _, r in patient_df.iterrows())
-                    )
-                },
-                'temporal_range': {
-                    'earliest_study': df['study_datetime'].min(),
-                    'latest_study': df['study_datetime'].max()
+                'clinical': {
+                    'format': 'tensor of normalized features',
+                    'features': self.config.clinical_features
                 }
+            },
+            'data_quality': {
+                split: {
+                    'validation_rate': f"{stats['validation_rate']*100:.2f}%",
+                    'valid_records': stats['valid_records'],
+                    'total_records': stats['total_records']
+                }
+                for split, stats in all_stats.items()
             }
-            
-            # Save comprehensive summary
-            summary_key = 'processed/master_summary.json'
-            self.s3.s3_client.put_object(
-                Bucket=output_bucket,
-                Key=summary_key,
-                Body=json.dumps(summary, indent=2, default=str).encode('utf-8')
-            )
-            
-            logger.info(f"Created master summary with {summary['processing_info']['total_patients']} patients")
-            
-            # Save flattened master index for querying
-            index_df = self._flatten_for_csv(df)
-            index_key = 'processed/master_index.csv'
-            self.s3.write_csv(index_df, output_bucket, index_key)
-            
-            logger.info(f"Created master index with {len(all_records)} records")
-            
-        except Exception as e:
-            logger.error(f"Error creating master index: {str(e)}")
-            raise
-    
-    def _flatten_for_csv(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Flatten nested dictionaries for CSV export"""
-        flat_df = df[['subject_id', 'stay_id', 'dicom_id', 
-                     'study_id', 'study_datetime', 'ViewPosition']].copy()
-        
-        # Add hadm_id if present
-        if 'hadm_id' in df.columns:
-            flat_df['hadm_id'] = df['hadm_id']
-        
-        # Flatten clinical features
-        for _, row in df.iterrows():
-            if row.get('clinical_features') and isinstance(row['clinical_features'], dict):
-                for key, value in row['clinical_features'].items():
-                    if key not in ['subject_id', 'stay_id']:  # Avoid duplicates
-                        flat_df.loc[_, f'clinical_{key}'] = value
-        
-        # Add summary metrics from nested structures
-        for _, row in df.iterrows():
-            # Lab metrics
-            if row.get('lab_results') and isinstance(row['lab_results'], dict):
-                flat_df.loc[_, 'lab_count'] = row['lab_results'].get('lab_count', 0)
-                flat_df.loc[_, 'unique_labs'] = row['lab_results'].get('unique_labs', 0)
-                flat_df.loc[_, 'abnormal_labs'] = row['lab_results'].get('abnormal_count', 0)
-            
-            # Medication metrics
-            if row.get('medications') and isinstance(row['medications'], dict):
-                flat_df.loc[_, 'medication_count'] = row['medications'].get('medication_count', 0)
-                flat_df.loc[_, 'unique_medications'] = row['medications'].get('unique_medications', 0)
-                flat_df.loc[_, 'has_antibiotics'] = row['medications'].get('has_antibiotics', False)
-            
-            # Diagnosis metrics
-            if row.get('diagnoses') and isinstance(row['diagnoses'], dict):
-                flat_df.loc[_, 'diagnosis_count'] = row['diagnoses'].get('diagnosis_count', 0)
-                flat_df.loc[_, 'unique_diagnoses'] = row['diagnoses'].get('unique_diagnoses', 0)
-            
-            # Procedure metrics
-            if row.get('procedures') and isinstance(row['procedures'], dict):
-                flat_df.loc[_, 'procedure_count'] = row['procedures'].get('procedure_count', 0)
-                flat_df.loc[_, 'unique_procedures'] = row['procedures'].get('unique_procedures', 0)
-        
-        return flat_df
-    
-    def run(self):
-        """Execute Phase 3: Comprehensive Integration"""
-        logger.info("="*60)
-        logger.info("Starting Phase 3: Comprehensive Data Integration")
-        logger.info("="*60)
-        
-        # Load Phase 2 results (JSON format for nested data)
-        output_bucket = self.config.get('aws.s3.output_bucket')
-        input_key = 'processing/patient_clinical_data_comprehensive.json'
-        
-        logger.info(f"Loading Phase 2 comprehensive results from s3://{output_bucket}/{input_key}")
-        
-        try:
-            # Load JSON data
-            response = self.s3.s3_client.get_object(Bucket=output_bucket, Key=input_key)
-            all_records = json.loads(response['Body'].read())
-            
-            if not all_records:
-                logger.error("No data found in Phase 2 results")
-                raise ValueError("Phase 2 results are empty")
-            
-            logger.info(f"Loaded {len(all_records)} records")
-            
-            # Group by patient
-            patient_groups = {}
-            for record in all_records:
-                subject_id = record['subject_id']
-                if subject_id not in patient_groups:
-                    patient_groups[subject_id] = []
-                patient_groups[subject_id].append(record)
-            
-            unique_patients = len(patient_groups)
-            logger.info(f"Processing {unique_patients} patients with {len(all_records)} total records")
-            
-            # Process each patient
-            processed_count = 0
-            failed_count = 0
-            
-            for subject_id, patient_records in tqdm(
-                patient_groups.items(),
-                desc="Integrating comprehensive patient data",
-                total=unique_patients
-            ):
-                try:
-                    self.process_patient(int(subject_id), patient_records)
-                    processed_count += 1
-                    
-                except Exception as e:
-                    logger.error(f"Failed to process patient {subject_id}: {str(e)}")
-                    failed_count += 1
-                    continue
-            
-            logger.info(f"Processed {processed_count} patients, {failed_count} failed")
-            
-            # Create master index
-            logger.info("Creating comprehensive master index...")
-            self.create_master_index(all_records)
-            
-            # Log comprehensive statistics
-            self._log_statistics(all_records, processed_count, failed_count)
-            
-            logger.info("Phase 3 complete!")
-            
-        except Exception as e:
-            logger.error(f"Failed to load Phase 2 results: {str(e)}")
-            logger.info("Attempting to load CSV fallback...")
-            
-            # Fallback to CSV if JSON not available
-            try:
-                csv_key = 'processing/patient_clinical_data_flat.csv'
-                patient_data = self.s3.read_csv(output_bucket, csv_key)
-                
-                # Process with limited data from CSV
-                self._process_from_csv(patient_data)
-                
-            except Exception as csv_error:
-                logger.error(f"Failed to load CSV fallback: {str(csv_error)}")
-                raise
-    
-    def _process_from_csv(self, patient_data: pd.DataFrame):
-        """Fallback processing from CSV data"""
-        logger.warning("Using CSV fallback - some nested data may not be available")
-        
-        # Convert DataFrame records to dict format
-        all_records = patient_data.to_dict('records')
-        
-        # Continue with regular processing
-        patient_groups = {}
-        for record in all_records:
-            subject_id = record['subject_id']
-            if subject_id not in patient_groups:
-                patient_groups[subject_id] = []
-            patient_groups[subject_id].append(record)
-        
-        for subject_id, patient_records in tqdm(patient_groups.items(), desc="Processing from CSV"):
-            try:
-                self.process_patient(int(subject_id), patient_records)
-            except Exception as e:
-                logger.error(f"Failed to process patient {subject_id}: {str(e)}")
-    
-    def _log_statistics(self, all_records: List[Dict], processed: int, failed: int):
-        """Log comprehensive integration statistics"""
-        # Calculate statistics
-        total_patients = len(set(r['subject_id'] for r in all_records))
-        total_records = len(all_records)
-        total_stays = len(set(r['stay_id'] for r in all_records if r.get('stay_id')))
-        total_admissions = len(set(r['hadm_id'] for r in all_records if r.get('hadm_id')))
-        
-        # Data completeness
-        with_clinical = sum(1 for r in all_records if r.get('clinical_features'))
-        with_labs = sum(1 for r in all_records if r.get('lab_results', {}).get('labs_available'))
-        with_meds = sum(1 for r in all_records if r.get('medications', {}).get('medications_available'))
-        with_diag = sum(1 for r in all_records if r.get('diagnoses', {}).get('diagnoses_available'))
-        with_proc = sum(1 for r in all_records if r.get('procedures', {}).get('procedures_available'))
-        
-        logger.info("="*60)
-        logger.info("Phase 3 Comprehensive Statistics:")
-        logger.info(f"  Total patients:           {total_patients:,}")
-        logger.info(f"  Processed successfully:   {processed:,}")
-        logger.info(f"  Failed:                   {failed:,}")
-        logger.info(f"  Total records:            {total_records:,}")
-        logger.info(f"  Total ED stays:           {total_stays:,}")
-        logger.info(f"  Total hospital admissions: {total_admissions:,}")
-        logger.info(f"  Avg records/patient:      {total_records/total_patients:.2f}")
-        logger.info("")
-        logger.info("Data Completeness:")
-        logger.info(f"  With clinical features:   {with_clinical:,} ({with_clinical/total_records*100:.1f}%)")
-        logger.info(f"  With lab results:         {with_labs:,} ({with_labs/total_records*100:.1f}%)")
-        logger.info(f"  With medications:         {with_meds:,} ({with_meds/total_records*100:.1f}%)")
-        logger.info(f"  With diagnoses:           {with_diag:,} ({with_diag/total_records*100:.1f}%)")
-        logger.info(f"  With procedures:          {with_proc:,} ({with_proc/total_records*100:.1f}%)")
-        logger.info("="*60)
+        }
+
+        # Construct metadata path
+        if self.config.use_gcs:
+            metadata_path = f"{self.config.output_path}/phase3_metadata.json"
+        else:
+            output_dir = Path(self.config.output_path).expanduser()
+            metadata_path = output_dir / "phase3_metadata.json"
+            metadata_path = str(metadata_path)
+
+        # Save metadata
+        metadata_json = json.dumps(metadata, indent=2)
+        if self.config.use_gcs and self.gcs_helper.output_bucket:
+            blob = self.gcs_helper.output_bucket.blob(metadata_path.replace(f"gs://{self.config.output_gcs_bucket}/", ""))
+            blob.upload_from_string(metadata_json)
+        else:
+            with open(metadata_path, 'w') as f:
+                f.write(metadata_json)
+
+        logger.info(f"Saved Phase 3 metadata to: {metadata_path}")
+
+    def generate_dataset_report(self, all_stats: Dict[str, Any]):
+        """
+        Generate comprehensive dataset report
+
+        Args:
+            all_stats: Statistics from all splits
+        """
+        logger.info("\n" + "=" * 60)
+        logger.info("FINAL DATASET REPORT")
+        logger.info("=" * 60)
+
+        total_records = sum(stats['total_records'] for stats in all_stats.values())
+        total_valid = sum(stats['valid_records'] for stats in all_stats.values())
+
+        logger.info(f"\nOverall Statistics:")
+        logger.info(f"  Total records:     {total_records:,}")
+        logger.info(f"  Valid records:     {total_valid:,}")
+        logger.info(f"  Validation rate:   {total_valid/total_records*100:.2f}%")
+
+        logger.info(f"\nSplit Distribution:")
+        for split_name, stats in all_stats.items():
+            logger.info(f"  {split_name.capitalize():5s}: {stats['valid_records']:,} records ({stats['validation_rate']*100:.1f}% valid)")
+
+        logger.info(f"\nText Statistics:")
+        for split_name, stats in all_stats.items():
+            logger.info(f"  {split_name.capitalize():5s}:")
+            logger.info(f"    Avg pseudo-note length:  {stats['avg_text_length']:.0f} chars")
+            logger.info(f"    Avg enhanced note length: {stats['avg_enhanced_text_length']:.0f} chars")
+
+        logger.info(f"\nView Position Distribution:")
+        all_views = defaultdict(int)
+        for stats in all_stats.values():
+            for view, count in stats['view_position_counts'].items():
+                all_views[view] += count
+
+        for view, count in sorted(all_views.items(), key=lambda x: x[1], reverse=True):
+            logger.info(f"  {view:10s}: {count:,} ({count/total_valid*100:.1f}%)")
+
+        logger.info("\n" + "=" * 60)
+        logger.info("Datasets ready for model training!")
+        logger.info("=" * 60)
+
+    def _log_validation_stats(self, split_name: str, stats: ValidationStats):
+        """Log validation statistics"""
+        logger.info(f"\nValidation Results for {split_name}:")
+        logger.info(f"  Total records:      {stats.total_records:,}")
+        logger.info(f"  Valid records:      {stats.valid_records:,}")
+        logger.info(f"  Validation rate:    {stats.valid_records/stats.total_records*100:.2f}%")
+
+        if stats.missing_images > 0:
+            logger.warning(f"  Missing images:     {stats.missing_images:,}")
+        if stats.missing_clinical > 0:
+            logger.warning(f"  Missing clinical:   {stats.missing_clinical:,}")
+        if stats.missing_text > 0:
+            logger.warning(f"  Missing text:       {stats.missing_text:,}")
+
+    def _log_sample_record(self, split_name: str, record: Dict):
+        """Log a sample integrated record"""
+        logger.info(f"\nSample integrated record from {split_name}:")
+        logger.info(f"  Subject ID:         {record['subject_id']}")
+        logger.info(f"  Study ID:           {record['study_id']}")
+        logger.info(f"  DICOM ID:           {record['dicom_id']}")
+        logger.info(f"  Image shape:        {record['image'].shape}")
+        logger.info(f"  Text tokens shape:  {record['text_input_ids'].shape}")
+        logger.info(f"  Clinical features:  {record['clinical_features'].shape if torch.is_tensor(record['clinical_features']) else 'N/A'}")
+        logger.info(f"  View position:      {record['view_position']}")
+        logger.info(f"  Pseudo-note (first 150 chars):")
+        logger.info(f"    {record['pseudo_note'][:150]}...")
 
 
 def main():
     """Main entry point for Phase 3"""
-    import argparse
-    from .utils import setup_logging
-    
     parser = argparse.ArgumentParser(
-        description='Phase 3: Integrate comprehensive clinical data into patient folders'
+        description='Phase 3: Multi-Modal Integration and Final Dataset Preparation',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
+
+    # Input/Output paths
     parser.add_argument(
-        '--log-level',
-        default='INFO',
-        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
-        help='Logging level'
+        '--input-path',
+        type=str,
+        required=True,
+        help='Path to Phase 2 output directory (local or GCS path)'
     )
+
+    # GCS settings
     parser.add_argument(
-        '--dry-run',
+        '--gcs-bucket',
+        type=str,
+        default=None,
+        help='GCS bucket name (if using GCS)'
+    )
+
+    parser.add_argument(
+        '--gcs-project-id',
+        type=str,
+        default=None,
+        help='GCP project ID for requester pays'
+    )
+
+    # Sample data option
+    parser.add_argument(
+        '--use-small-sample',
         action='store_true',
-        help='Dry run - do not copy images'
+        help='Process small sample files (e.g., train_small_enhanced.pt) for testing'
     )
-    parser.add_argument(
-        '--skip-images',
-        action='store_true',
-        help='Skip copying CXR images'
-    )
-    
+
     args = parser.parse_args()
-    
-    # Setup logging
-    setup_logging(log_level=args.log_level)
-    
-    # Run Phase 3
-    integrator = DataIntegrator()
-    
-    # Override settings based on arguments
-    if args.dry_run or args.skip_images:
-        logger.info("Images will not be copied")
-        integrator.copy_images = False
-    
-    integrator.run()
+
+    # Create configuration
+    config = DataConfig()
+
+    # Set paths
+    config.output_path = args.input_path
+
+    # Set GCS settings
+    config.use_gcs = args.gcs_bucket is not None
+    config.gcs_bucket = args.gcs_bucket
+    config.output_gcs_bucket = args.gcs_bucket
+    config.gcs_project_id = args.gcs_project_id
+
+    logger.info("=" * 60)
+    logger.info("Phase 3: Multi-Modal Integration and Final Dataset Preparation")
+    logger.info("=" * 60)
+    logger.info(f"Mode: {'GCS' if config.use_gcs else 'Local'}")
+    if config.use_gcs:
+        logger.info(f"Bucket: {config.gcs_bucket}")
+    logger.info(f"Input path: {config.output_path}")
+    logger.info(f"Use small sample: {args.use_small_sample}")
+    logger.info("=" * 60)
+
+    # Create processor
+    processor = Phase3Processor(config)
+
+    # Process all splits
+    all_stats = processor.process_all_splits(use_small_sample=args.use_small_sample)
+
+    # Save metadata
+    processor.save_final_metadata(all_stats)
+
+    # Generate final report
+    processor.generate_dataset_report(all_stats)
+
+    logger.info("Phase 3 processing complete!")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
