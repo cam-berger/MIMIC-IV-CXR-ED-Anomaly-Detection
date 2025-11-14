@@ -268,6 +268,49 @@ python src/run_full_pipeline.py \
 
 **See [docs/PHASE2_ENHANCED_NOTES.md](docs/PHASE2_ENHANCED_NOTES.md) for detailed Phase 2 documentation**
 
+### Phase 3: Multi-Modal Integration and Final Dataset Preparation
+
+1. **Load Phase 2 Enhanced Outputs**
+   - Read *_enhanced.pt files from Phase 2
+   - Load all modalities: images, enhanced text, clinical features
+
+2. **Data Quality Validation**
+   - Validate all required fields are present
+   - Check image tensor shapes (3, 518, 518)
+   - Verify enhanced text tokens have input_ids and attention_mask
+   - Validate clinical features tensors
+
+3. **Multi-Modal Integration**
+   - Combine vision modality (BiomedCLIP input)
+   - Integrate text modality (Clinical ModernBERT input)
+   - Align clinical features (structured data)
+   - Create unified model-ready format
+
+4. **Generate Statistics**
+   - Calculate validation rates per split
+   - Compute text length statistics
+   - Analyze view position distribution
+   - Generate comprehensive quality metrics
+
+5. **Save Final Datasets**
+   - Save as *_final.pt files ready for model training
+   - Generate detailed metadata and quality reports
+   - Create comprehensive dataset documentation
+
+**Usage:**
+```bash
+# Run Phase 3 integration
+python src/phase3_integration.py \
+  --input-path processed/phase1_output \
+  --gcs-bucket bergermimiciv \
+  --gcs-project-id YOUR_PROJECT_ID
+
+# Or test with small samples
+python src/phase3_integration.py \
+  --input-path processed/phase1_output \
+  --use-small-sample
+```
+
 ### Expected Output
 
 After running Phase 1, you'll find these files in your output directory:
@@ -296,7 +339,24 @@ processed/phase1_output/
 └── phase2_metadata.json           # Phase 2 processing metadata
 ```
 
-**Note:** Small sample files (`*_small.pt`) are only created when using the `--create-small-samples` flag in Phase 1. These are perfect for quickly testing Phase 2 without loading the full dataset.
+After running Phase 3, final integrated files are created:
+
+```
+processed/phase1_output/
+├── train_data.pt                  # Original Phase 1 output
+├── train_data_enhanced.pt         # Phase 2: With pseudo-notes + RAG
+├── train_final.pt                 # Phase 3: Final model-ready dataset
+├── val_data.pt                    # Original Phase 1 output
+├── val_data_enhanced.pt           # Phase 2: With pseudo-notes + RAG
+├── val_final.pt                   # Phase 3: Final model-ready dataset
+├── test_data.pt                   # Original Phase 1 output
+├── test_data_enhanced.pt          # Phase 2: With pseudo-notes + RAG
+├── test_final.pt                  # Phase 3: Final model-ready dataset
+├── phase2_metadata.json           # Phase 2 processing metadata
+└── phase3_metadata.json           # Phase 3 integration metadata and quality report
+```
+
+**Note:** Small sample files (`*_small.pt`) are only created when using the `--create-small-samples` flag in Phase 1. These are perfect for quickly testing Phase 2 and Phase 3 without loading the full dataset.
 
 **Phase 1 record structure** (.pt files):
 ```python
@@ -324,6 +384,39 @@ processed/phase1_output/
         'attention_mask': torch.Tensor
     },
     'phase2_processed': True            # Processing flag
+}
+```
+
+**Phase 3 final record structure** (*_final.pt files):
+```python
+{
+    # Identifiers
+    'subject_id': int,                  # Patient identifier
+    'study_id': int,                    # Imaging study identifier
+    'dicom_id': str,                    # DICOM image ID
+
+    # Vision modality (BiomedCLIP input)
+    'image': torch.Tensor,              # [3, 518, 518]
+    'attention_regions': Dict,          # Attention maps
+
+    # Text modality (Clinical ModernBERT input)
+    'text_input_ids': torch.Tensor,     # Tokenized enhanced note
+    'text_attention_mask': torch.Tensor,# Attention mask
+    'pseudo_note': str,                 # Raw pseudo-note (for analysis)
+    'enhanced_note': str,               # Raw enhanced note (for analysis)
+
+    # Clinical features (structured data)
+    'clinical_features': torch.Tensor,  # Normalized clinical features
+
+    # Labels and metadata
+    'labels': Dict,                     # All labels
+    'view_position': str,               # CXR view position
+    'retrieved_knowledge': List[str],   # RAG knowledge
+
+    # Processing flags
+    'phase1_processed': True,
+    'phase2_processed': True,
+    'phase3_integrated': True           # Final integration flag
 }
 ```
 
@@ -637,5 +730,5 @@ For questions or issues:
 
 ---
 
-**Last Updated**: 2025-10-28
-**Status**: Phase 1 Complete | Memory-Efficient Streaming | Stratified Splitting | Resume Capability | Small Sample Datasets | 107,949+ Records Matched | Runs on 7.5GB RAM
+**Last Updated**: 2025-11-14
+**Status**: Phase 1-3 Complete | Pseudo-Note Generation | RAG Enhancement | Multi-Modal Integration | Data Quality Validation | Model-Ready Datasets | 107,949+ Records | Memory-Efficient
