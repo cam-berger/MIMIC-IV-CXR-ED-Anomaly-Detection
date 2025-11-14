@@ -39,8 +39,7 @@ RUN python -c "from transformers import AutoTokenizer; \
 
 # Copy source code
 COPY src/ ./src/
-COPY notebooks/ ./notebooks/
-COPY LOCAL_TESTING.md .
+COPY docs/ ./docs/
 COPY README.md .
 
 # Create directories for data mounting

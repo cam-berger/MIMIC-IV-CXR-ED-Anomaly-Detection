@@ -1,0 +1,143 @@
+# Base Configuration for Enhanced MDF-Net Training
+# ================================================
+
+# Model Configuration
+model:
+  name: "EnhancedMDFNet"
+  num_classes: 14
+  clinical_feature_dim: 45
+  modalities: ['vision', 'text', 'clinical']  # Which modalities to use
+  freeze_encoders: true  # Freeze pre-trained encoders (Stage 1)
+  dropout_fusion: 0.3
+  dropout_head1: 0.3
+  dropout_head2: 0.2
+
+# Loss Configuration
+loss:
+  name: "CombinedLoss"
+  bce_weight: 0.7
+  focal_weight: 0.3
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+# Optimizer Configuration
+optimizer:
+  name: "AdamW"
+  lr: 1.0e-3  # Base learning rate
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
+
+  # Discriminative learning rates (for Stage 2 fine-tuning)
+  use_discriminative_lr: false
+  lr_encoders: 1.0e-5  # For pre-trained encoders
+  lr_fusion: 1.0e-4    # For fusion layer
+  lr_head: 1.0e-4      # For classification head
+
+# Learning Rate Scheduler
+scheduler:
+  name: "cosine"  # Options: cosine, step, plateau
+  warmup_epochs: 3
+  min_lr: 1.0e-6
+
+  # For step scheduler
+  step_size: 10
+  gamma: 0.1
+
+  # For plateau scheduler
+  patience: 5
+  factor: 0.5
+
+# Training Configuration
+training:
+  max_epochs: 15
+  batch_size: 16  # Per GPU
+  gradient_accumulation_steps: 2  # Effective batch = 16 * 2 = 32 per GPU
+
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 10
+    monitor: "val_mean_auroc"
+    mode: "max"
+    min_delta: 0.001
+
+  # Gradient clipping
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: "norm"
+
+  # Mixed precision
+  precision: "16-mixed"  # Options: 32, 16-mixed, bf16-mixed
+
+  # Checkpointing
+  save_top_k: 3  # Save top 3 checkpoints
+  save_last: true
+  monitor: "val_mean_auroc"
+  mode: "max"
+  save_interval_epochs: 5  # Save every 5 epochs regardless of performance
+
+# Data Configuration
+data:
+  # Data paths
+  data_root: "/media/dev/MIMIC_DATA/phase1_with_path_fixes_raw"
+  train_file: "train_final.pt"
+  val_file: "val_final.pt"
+  test_file: "test_final.pt"
+
+  # DataLoader settings
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+
+  # Data augmentation (for training only)
+  augmentation:
+    enabled: true
+    horizontal_flip_prob: 0.5
+    rotation_degrees: 10
+    color_jitter:
+      brightness: 0.2
+      contrast: 0.2
+
+  # Weighted sampling for class imbalance
+  use_weighted_sampler: false
+
+# Logging Configuration
+logging:
+  experiment_name: "enhanced_mdfnet_baseline"
+  log_dir: "logs"
+  tensorboard_dir: "tb_logs"
+  log_every_n_steps: 50
+
+  # What to log
+  log_lr: true
+  log_gradients: false  # Can be slow
+  log_weights: false    # Can be slow
+
+# Distributed Training
+distributed:
+  strategy: "ddp"  # Options: ddp, ddp_spawn, deepspeed
+  num_nodes: 1
+  devices: 1  # Number of GPUs per node (-1 for all available)
+  accelerator: "auto"  # Options: auto, gpu, cpu
+
+# Compute Environment
+compute:
+  deterministic: false  # Set to true for reproducibility (slower)
+  benchmark: true       # Set to false for reproducibility
+  seed: 42
+
+# Class Names (for logging and visualization)
+class_names:
+  - "No Finding"
+  - "Atelectasis"
+  - "Cardiomegaly"
+  - "Consolidation"
+  - "Edema"
+  - "Enlarged Cardiomediastinum"
+  - "Fracture"
+  - "Lung Lesion"
+  - "Lung Opacity"
+  - "Pleural Effusion"
+  - "Pleural Other"
+  - "Pneumonia"
+  - "Pneumothorax"
+  - "Support Devices"
