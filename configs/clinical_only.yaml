@@ -1,0 +1,117 @@
+# Clinical-Only Baseline Configuration
+# ======================================
+# Baseline using only structured clinical features (45 features)
+# For fair comparison with full multi-modal model
+
+# Model Configuration
+model:
+  name: "EnhancedMDFNet"
+  num_classes: 14
+  clinical_feature_dim: 45
+  modalities: ['clinical']  # CLINICAL ONLY
+  freeze_encoders: false  # Train clinical encoder from scratch
+  dropout_fusion: 0.3  # Not used (no fusion for single modality)
+  dropout_head1: 0.3
+  dropout_head2: 0.2
+
+# Loss Configuration
+loss:
+  name: "CombinedLoss"
+  bce_weight: 0.7
+  focal_weight: 0.3
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+# Optimizer Configuration
+optimizer:
+  name: "AdamW"
+  lr: 1.0e-3  # Higher LR since training from scratch (no pre-training)
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
+  use_discriminative_lr: false  # Single modality, single LR
+
+# Learning Rate Scheduler
+scheduler:
+  name: "cosine"
+  warmup_epochs: 3
+  min_lr: 1.0e-6
+
+# Training Configuration
+training:
+  max_epochs: 30  # Same as full model
+  batch_size: 16
+  gradient_accumulation_steps: 2
+
+  early_stopping:
+    enabled: true
+    patience: 10
+    monitor: "val_mean_auroc"
+    mode: "max"
+    min_delta: 0.001
+
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: "norm"
+  precision: "16-mixed"
+
+  save_top_k: 3
+  save_last: true
+  monitor: "val_mean_auroc"
+  mode: "max"
+  save_interval_epochs: 5
+
+# Data Configuration
+data:
+  data_root: "/media/dev/MIMIC_DATA/phase1_with_path_fixes_raw"
+  train_file: "train_final.pt"
+  val_file: "val_final.pt"
+  test_file: "test_final.pt"
+
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+
+  # No augmentation for clinical-only
+  augmentation:
+    enabled: false
+
+  use_weighted_sampler: false
+
+# Logging Configuration
+logging:
+  experiment_name: "clinical_only_baseline"
+  log_dir: "logs"
+  tensorboard_dir: "tb_logs"
+  log_every_n_steps: 50
+  log_lr: true
+  log_gradients: false
+  log_weights: false
+
+# Distributed Training
+distributed:
+  strategy: "ddp"
+  num_nodes: 1
+  devices: 1
+  accelerator: "auto"
+
+# Compute Environment
+compute:
+  deterministic: false
+  benchmark: true
+  seed: 42
+
+# Class Names
+class_names:
+  - "No Finding"
+  - "Atelectasis"
+  - "Cardiomegaly"
+  - "Consolidation"
+  - "Edema"
+  - "Enlarged Cardiomediastinum"
+  - "Fracture"
+  - "Lung Lesion"
+  - "Lung Opacity"
+  - "Pleural Effusion"
+  - "Pleural Other"
+  - "Pneumonia"
+  - "Pneumothorax"
+  - "Support Devices"
