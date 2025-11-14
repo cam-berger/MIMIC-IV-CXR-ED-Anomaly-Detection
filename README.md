@@ -17,6 +17,8 @@ HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused w
 - **Small Sample Datasets**: Automatically generate small test versions for rapid Phase 2 development
 
 ### Technical Documentation
+- **[Training Guide](docs/TRAINING_GUIDE.md)**: Complete guide for fine-tuning Enhanced MDF-Net with multi-GPU support
+- **[Evaluation Guide](docs/EVALUATION_GUIDE.md)**: Comprehensive testing with metrics, confusion matrices, and correlation analysis
 - **[OOM Solution Guide](docs/OOM_SOLUTION.md)**: Solutions for memory management and out-of-memory issues
 - **[Phase 2 Refactoring Summary](docs/PHASE2_REFACTORING_SUMMARY.md)**: Complete Phase 2 implementation details
 - **[Phase 3 Integration Guide](docs/PHASE3_INTEGRATION.md)**: Multi-modal integration and final dataset preparation
