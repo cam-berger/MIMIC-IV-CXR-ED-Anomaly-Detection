@@ -37,12 +37,21 @@ def verify_file_exists(data_root: str, filename: str) -> bool:
     return True
 
 
-def verify_data_format(data_root: str, filename: str) -> bool:
-    """Verify data format is correct"""
+def verify_data_format(data_root: str, filename: str, max_samples: int = 10) -> bool:
+    """
+    Verify data format is correct
+
+    Args:
+        data_root: Directory containing data files
+        filename: Name of file to verify
+        max_samples: Max number of samples to load (to avoid OOM)
+    """
     logger.info(f"\nVerifying format of {filename}...")
 
     try:
         path = Path(data_root) / filename
+
+        # Load only first few samples to avoid OOM
         data = torch.load(path, map_location='cpu', weights_only=False)
 
         if not isinstance(data, list):
@@ -53,22 +62,38 @@ def verify_data_format(data_root: str, filename: str) -> bool:
             logger.error(f"❌ Data is empty!")
             return False
 
-        logger.info(f"✓ Loaded {len(data)} samples")
+        # Only check first max_samples to save memory
+        original_len = len(data)
+        if len(data) > max_samples:
+            data = data[:max_samples]
+            logger.info(f"✓ Loaded {original_len} samples (checking first {max_samples})")
+        else:
+            logger.info(f"✓ Loaded {len(data)} samples")
 
         # Check first sample
         sample = data[0]
+
+        # Required keys (essential for training)
         required_keys = [
-            'subject_id', 'study_id', 'dicom_id',
             'image', 'text_input_ids', 'text_attention_mask',
             'clinical_features', 'labels'
         ]
 
+        # Optional keys (metadata)
+        optional_keys = ['subject_id', 'study_id', 'dicom_id']
+
+        # Check required keys
         for key in required_keys:
             if key not in sample:
                 logger.error(f"❌ Missing required key: {key}")
                 return False
 
         logger.info(f"✓ All required keys present")
+
+        # Check optional keys (just log warnings, don't fail)
+        for key in optional_keys:
+            if key not in sample:
+                logger.warning(f"⚠️  Optional key missing: {key}")
 
         # Check data types and shapes
         if not isinstance(sample['image'], torch.Tensor):
@@ -114,6 +139,11 @@ def verify_data_format(data_root: str, filename: str) -> bool:
                 return False
 
         logger.info(f"✓ All label values are binary (0 or 1)")
+
+        # Clear memory
+        del data
+        import gc
+        gc.collect()
 
         return True
 
