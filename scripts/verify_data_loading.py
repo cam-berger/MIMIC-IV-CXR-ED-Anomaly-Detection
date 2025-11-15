@@ -73,13 +73,143 @@ def verify_data_format(data_root: str, filename: str, max_samples: int = 10) -> 
         # Check first sample
         sample = data[0]
 
-        # Required keys (essential for training)
+        # Detect data format by checking available keys
+        has_image_tensor = 'image_tensor' in sample
+        has_image = 'image' in sample
+        has_clinical_data_str = 'clinical_data' in sample and isinstance(sample.get('clinical_data'), str)
+        has_clinical_features = 'clinical_features' in sample
+        has_nested_labels = 'labels' in sample and isinstance(sample.get('labels'), dict) and 'disease_labels' in sample.get('labels', {})
+        has_flat_labels = 'labels' in sample and isinstance(sample.get('labels'), dict) and not has_nested_labels
+
+        # Determine format
+        if has_image_tensor and has_clinical_data_str and has_nested_labels:
+            data_format = "enhanced_rag"
+            logger.info(f"✓ Detected format: ENHANCED RAG (with attention, bbox, etc.)")
+        elif has_image and has_clinical_features and has_flat_labels:
+            data_format = "standard"
+            logger.info(f"✓ Detected format: STANDARD (simple multi-modal)")
+        else:
+            data_format = "unknown"
+            logger.warning(f"⚠️  Unknown data format detected")
+
+        # Verify based on detected format
+        if data_format == "enhanced_rag":
+            return verify_enhanced_rag_format(sample, data)
+        elif data_format == "standard":
+            return verify_standard_format(sample, data)
+        else:
+            logger.error(f"❌ Could not determine data format")
+            logger.info(f"   Available keys: {list(sample.keys())}")
+            return False
+
+    except Exception as e:
+        logger.error(f"❌ Error verifying data: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def verify_enhanced_rag_format(sample: dict, data: list) -> bool:
+    """Verify enhanced RAG format with attention segments and bbox"""
+    try:
+        logger.info("\nVerifying Enhanced RAG format...")
+
+        # Required keys for enhanced format
+        required_keys = [
+            'image_tensor', 'text_input_ids', 'text_attention_mask',
+            'clinical_data', 'labels', 'enhanced_note'
+        ]
+
+        # Optional keys
+        optional_keys = ['subject_id', 'study_id', 'attention_segments']
+
+        # Check required keys
+        for key in required_keys:
+            if key not in sample:
+                logger.error(f"❌ Missing required key: {key}")
+                return False
+
+        logger.info(f"✓ All required keys present")
+
+        # Check optional keys
+        for key in optional_keys:
+            if key not in sample:
+                logger.warning(f"⚠️  Optional key missing: {key}")
+
+        # Verify image_tensor
+        if not isinstance(sample['image_tensor'], torch.Tensor):
+            logger.error(f"❌ image_tensor should be torch.Tensor, got {type(sample['image_tensor'])}")
+            return False
+
+        if sample['image_tensor'].shape != (3, 518, 518):
+            logger.error(f"❌ image_tensor shape should be (3, 518, 518), got {sample['image_tensor'].shape}")
+            return False
+
+        logger.info(f"✓ Image tensor shape correct: {sample['image_tensor'].shape}")
+
+        # Verify text inputs
+        if not isinstance(sample['text_input_ids'], torch.Tensor):
+            logger.error(f"❌ text_input_ids should be torch.Tensor")
+            return False
+
+        logger.info(f"✓ Text input_ids shape: {sample['text_input_ids'].shape}")
+
+        # Verify clinical_data (JSON string)
+        if not isinstance(sample['clinical_data'], str):
+            logger.error(f"❌ clinical_data should be JSON string, got {type(sample['clinical_data'])}")
+            return False
+
+        import json
+        try:
+            clinical_dict = json.loads(sample['clinical_data'])
+            logger.info(f"✓ Clinical data is valid JSON with {len(clinical_dict)} fields")
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ clinical_data is not valid JSON: {e}")
+            return False
+
+        # Verify labels (nested structure)
+        if not isinstance(sample['labels'], dict):
+            logger.error(f"❌ labels should be dict, got {type(sample['labels'])}")
+            return False
+
+        if 'disease_labels' not in sample['labels']:
+            logger.error(f"❌ labels should contain 'disease_labels'")
+            return False
+
+        disease_labels = sample['labels']['disease_labels']
+        if isinstance(disease_labels, list):
+            logger.info(f"✓ Labels format correct (list with {len(disease_labels)} disease labels)")
+        else:
+            logger.warning(f"⚠️  disease_labels has unexpected type: {type(disease_labels)}")
+
+        logger.info(f"✓ Enhanced RAG format verified successfully")
+
+        # Clear memory
+        del data
+        import gc
+        gc.collect()
+
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Error verifying enhanced RAG format: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def verify_standard_format(sample: dict, data: list) -> bool:
+    """Verify standard format with flat structure"""
+    try:
+        logger.info("\nVerifying Standard format...")
+
+        # Required keys for standard format
         required_keys = [
             'image', 'text_input_ids', 'text_attention_mask',
             'clinical_features', 'labels'
         ]
 
-        # Optional keys (metadata)
+        # Optional keys
         optional_keys = ['subject_id', 'study_id', 'dicom_id']
 
         # Check required keys
@@ -90,12 +220,12 @@ def verify_data_format(data_root: str, filename: str, max_samples: int = 10) -> 
 
         logger.info(f"✓ All required keys present")
 
-        # Check optional keys (just log warnings, don't fail)
+        # Check optional keys
         for key in optional_keys:
             if key not in sample:
                 logger.warning(f"⚠️  Optional key missing: {key}")
 
-        # Check data types and shapes
+        # Verify image
         if not isinstance(sample['image'], torch.Tensor):
             logger.error(f"❌ image should be torch.Tensor, got {type(sample['image'])}")
             return False
@@ -106,12 +236,14 @@ def verify_data_format(data_root: str, filename: str, max_samples: int = 10) -> 
 
         logger.info(f"✓ Image shape correct: {sample['image'].shape}")
 
+        # Verify text inputs
         if not isinstance(sample['text_input_ids'], torch.Tensor):
             logger.error(f"❌ text_input_ids should be torch.Tensor")
             return False
 
         logger.info(f"✓ Text input_ids shape: {sample['text_input_ids'].shape}")
 
+        # Verify clinical_features
         if not isinstance(sample['clinical_features'], torch.Tensor):
             logger.error(f"❌ clinical_features should be torch.Tensor")
             return False
@@ -122,6 +254,7 @@ def verify_data_format(data_root: str, filename: str, max_samples: int = 10) -> 
 
         logger.info(f"✓ Clinical features shape: {sample['clinical_features'].shape}")
 
+        # Verify labels (flat dict)
         if not isinstance(sample['labels'], dict):
             logger.error(f"❌ labels should be dict, got {type(sample['labels'])}")
             return False
@@ -139,6 +272,7 @@ def verify_data_format(data_root: str, filename: str, max_samples: int = 10) -> 
                 return False
 
         logger.info(f"✓ All label values are binary (0 or 1)")
+        logger.info(f"✓ Standard format verified successfully")
 
         # Clear memory
         del data
@@ -148,7 +282,7 @@ def verify_data_format(data_root: str, filename: str, max_samples: int = 10) -> 
         return True
 
     except Exception as e:
-        logger.error(f"❌ Error verifying data: {e}")
+        logger.error(f"❌ Error verifying standard format: {e}")
         import traceback
         traceback.print_exc()
         return False
