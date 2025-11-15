@@ -204,13 +204,43 @@ def test_dataloader(data_root: str) -> bool:
         return False
 
 
+def detect_data_format(data_root: str) -> dict:
+    """
+    Auto-detect whether data is in chunked or combined format
+
+    Returns:
+        dict with 'format' ('chunked' or 'combined') and 'files' list
+    """
+    data_path = Path(data_root)
+
+    # Check for combined format first
+    combined_files = ['train_final.pt', 'val_final.pt', 'test_final.pt']
+    if all((data_path / f).exists() for f in combined_files):
+        return {'format': 'combined', 'files': combined_files}
+
+    # Check for chunked format
+    train_chunks = sorted(data_path.glob('train_chunk_*.pt'))
+    val_chunks = sorted(data_path.glob('val_chunk_*.pt'))
+    test_chunks = sorted(data_path.glob('test_chunk_*.pt'))
+
+    if train_chunks or val_chunks or test_chunks:
+        return {
+            'format': 'chunked',
+            'train_chunks': [f.name for f in train_chunks],
+            'val_chunks': [f.name for f in val_chunks],
+            'test_chunks': [f.name for f in test_chunks]
+        }
+
+    return {'format': 'not_found', 'files': []}
+
+
 def main():
     import argparse
 
     parser = argparse.ArgumentParser(description='Verify data loading works correctly')
     parser.add_argument('--data-root', type=str,
                        default='/media/dev/MIMIC_DATA/phase1_with_path_fixes_raw',
-                       help='Directory containing train/val/test_final.pt files')
+                       help='Directory containing train/val/test files (.pt or chunks)')
 
     args = parser.parse_args()
 
@@ -219,51 +249,172 @@ def main():
     logger.info("=" * 60)
     logger.info(f"Data root: {args.data_root}\n")
 
+    # Detect data format
+    logger.info("Detecting data format...")
+    data_info = detect_data_format(args.data_root)
+
+    if data_info['format'] == 'not_found':
+        logger.error("❌ No data files found!")
+        logger.error("Expected either:")
+        logger.error("  - Combined: train_final.pt, val_final.pt, test_final.pt")
+        logger.error("  - Chunked: train_chunk_*.pt, val_chunk_*.pt, test_chunk_*.pt")
+        logger.error(f"\nPlease check that data exists in: {args.data_root}")
+        return False
+
+    logger.info(f"✓ Detected format: {data_info['format'].upper()}")
+
     all_passed = True
 
-    # Test 1: Check files exist
-    logger.info("Test 1: Checking files exist...")
-    for filename in ['train_final.pt', 'val_final.pt', 'test_final.pt']:
-        if not verify_file_exists(args.data_root, filename):
+    if data_info['format'] == 'combined':
+        # Test combined format
+        logger.info("\nTest 1: Checking files exist...")
+        for filename in data_info['files']:
+            if not verify_file_exists(args.data_root, filename):
+                all_passed = False
+
+        if not all_passed:
+            logger.error("\n❌ Files not found. Please check data_root path.")
+            return False
+
+        # Test 2: Verify data format
+        logger.info("\n" + "-" * 60)
+        for filename in data_info['files']:
+            if not verify_data_format(args.data_root, filename):
+                all_passed = False
+
+        if not all_passed:
+            logger.error("\n❌ Data format verification failed.")
+            return False
+
+        # Test 3: Test MIMICDataset
+        logger.info("\n" + "-" * 60)
+        if not test_dataset_loading(args.data_root):
             all_passed = False
 
-    if not all_passed:
-        logger.error("\n❌ Files not found. Please check data_root path.")
-        return
-
-    # Test 2: Verify data format
-    logger.info("\n" + "-" * 60)
-    for filename in ['train_final.pt', 'val_final.pt', 'test_final.pt']:
-        if not verify_data_format(args.data_root, filename):
+        # Test 4: Test DataLoader
+        logger.info("\n" + "-" * 60)
+        if not test_dataloader(args.data_root):
             all_passed = False
 
-    if not all_passed:
-        logger.error("\n❌ Data format verification failed.")
-        return
+    else:
+        # Test chunked format
+        logger.info(f"\n✓ Found {len(data_info['train_chunks'])} train chunks")
+        logger.info(f"✓ Found {len(data_info['val_chunks'])} val chunks")
+        logger.info(f"✓ Found {len(data_info['test_chunks'])} test chunks")
 
-    # Test 3: Test MIMICDataset
-    logger.info("\n" + "-" * 60)
-    if not test_dataset_loading(args.data_root):
-        all_passed = False
+        # Test a sample chunk from each split
+        logger.info("\nTest 1: Verifying chunk format...")
+        test_chunks = []
 
-    # Test 4: Test DataLoader
-    logger.info("\n" + "-" * 60)
-    if not test_dataloader(args.data_root):
-        all_passed = False
+        if data_info['train_chunks']:
+            test_chunks.append(data_info['train_chunks'][0])
+        if data_info['val_chunks']:
+            test_chunks.append(data_info['val_chunks'][0])
+        if data_info['test_chunks']:
+            test_chunks.append(data_info['test_chunks'][0])
+
+        for chunk_file in test_chunks:
+            logger.info(f"\nTesting: {chunk_file}")
+            if not verify_data_format(args.data_root, chunk_file):
+                all_passed = False
+
+        if not all_passed:
+            logger.error("\n❌ Chunk format verification failed.")
+            return False
+
+        # Test 3: Test MIMICDataset with first train chunk
+        logger.info("\n" + "-" * 60)
+        logger.info("Testing MIMICDataset with first train chunk...")
+        if data_info['train_chunks']:
+            chunk_path = str(Path(args.data_root) / data_info['train_chunks'][0])
+            try:
+                dataset = MIMICDataset(chunk_path, augmentation=None, max_samples=10)
+                logger.info(f"✓ Created dataset with {len(dataset)} samples")
+
+                # Get a sample
+                sample = dataset[0]
+                logger.info(f"✓ Retrieved sample 0")
+                logger.info(f"  - Image shape: {sample['image'].shape}")
+                logger.info(f"  - Text input_ids shape: {sample['text_input_ids'].shape}")
+                logger.info(f"  - Clinical features shape: {sample['clinical_features'].shape}")
+                logger.info(f"  - Labels: {len(sample['labels'])} classes")
+            except Exception as e:
+                logger.error(f"❌ Error testing dataset: {e}")
+                import traceback
+                traceback.print_exc()
+                all_passed = False
+
+        # Test 4: Test DataLoader with first train chunk
+        logger.info("\n" + "-" * 60)
+        logger.info("Testing DataLoader with first train chunk...")
+        if data_info['train_chunks']:
+            chunk_path = str(Path(args.data_root) / data_info['train_chunks'][0])
+            try:
+                dataset = MIMICDataset(chunk_path, augmentation=None, max_samples=10)
+
+                dataloader = DataLoader(
+                    dataset,
+                    batch_size=4,
+                    shuffle=False,
+                    num_workers=0,
+                    collate_fn=collate_fn
+                )
+
+                logger.info(f"✓ Created DataLoader")
+
+                # Get a batch
+                batch = next(iter(dataloader))
+
+                logger.info(f"✓ Retrieved batch")
+                logger.info(f"  - Batch size: {batch['image'].shape[0]}")
+                logger.info(f"  - Image batch shape: {batch['image'].shape}")
+                logger.info(f"  - Text input_ids batch shape: {batch['text_input_ids'].shape}")
+                logger.info(f"  - Clinical features batch shape: {batch['clinical_features'].shape}")
+                logger.info(f"  - Labels: {len(batch['labels'])} classes")
+
+                # Verify batching worked correctly
+                expected_batch_size = min(4, len(dataset))
+                if batch['image'].shape[0] != expected_batch_size:
+                    logger.error(f"❌ Batch size should be {expected_batch_size}, got {batch['image'].shape[0]}")
+                    all_passed = False
+
+                if batch['image'].shape[1:] != (3, 518, 518):
+                    logger.error(f"❌ Image shape should be (3, 518, 518), got {batch['image'].shape[1:]}")
+                    all_passed = False
+
+                if batch['clinical_features'].shape != (expected_batch_size, 45):
+                    logger.error(f"❌ Clinical features shape should be ({expected_batch_size}, 45), got {batch['clinical_features'].shape}")
+                    all_passed = False
+
+                if all_passed:
+                    logger.info(f"✓ Batch shapes are correct")
+
+            except Exception as e:
+                logger.error(f"❌ Error testing dataloader: {e}")
+                import traceback
+                traceback.print_exc()
+                all_passed = False
 
     # Summary
     logger.info("\n" + "=" * 60)
     if all_passed:
         logger.info("✅ ALL TESTS PASSED!")
         logger.info("=" * 60)
+        logger.info(f"\nData format: {data_info['format'].upper()}")
+
+        if data_info['format'] == 'chunked':
+            logger.info(f"  Train chunks: {len(data_info['train_chunks'])}")
+            logger.info(f"  Val chunks:   {len(data_info['val_chunks'])}")
+            logger.info(f"  Test chunks:  {len(data_info['test_chunks'])}")
+            logger.info("\nNote: Chunked format is recommended for large datasets")
+            logger.info("      Your dataloader can use individual chunks for training")
+
         logger.info("\nYour data is ready to use!")
         logger.info("\nNext steps:")
-        logger.info("  1. Create debug dataset:")
-        logger.info("     python scripts/create_debug_dataset.py")
-        logger.info("  2. Analyze dataset:")
-        logger.info("     python scripts/analyze_dataset.py")
-        logger.info("  3. Test training pipeline:")
-        logger.info("     python scripts/test_full_pipeline_debug.py")
+        logger.info("  1. Analyze dataset:")
+        logger.info(f"     python scripts/analyze_dataset.py --data-root {args.data_root}")
+        logger.info("  2. Start training:")
+        logger.info(f"     python src/training/train_lightning.py --data-root {args.data_root}")
     else:
         logger.error("❌ SOME TESTS FAILED")
         logger.error("=" * 60)
