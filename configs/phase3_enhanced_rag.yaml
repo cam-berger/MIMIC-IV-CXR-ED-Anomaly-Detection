@@ -1,0 +1,144 @@
+# Phase 3 Configuration for Enhanced RAG Data
+# =============================================
+# Training with automatically converted Enhanced RAG format data
+
+# Model Configuration
+model:
+  name: "EnhancedMDFNet"
+  num_classes: 14
+  clinical_feature_dim: 45
+  modalities: ['vision', 'text', 'clinical']  # Full multi-modal training
+  freeze_encoders: false  # Fine-tune all encoders (Phase 3)
+  dropout_fusion: 0.3
+  dropout_head1: 0.3
+  dropout_head2: 0.2
+
+# Loss Configuration
+loss:
+  name: "CombinedLoss"
+  bce_weight: 0.7
+  focal_weight: 0.3
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+# Optimizer Configuration
+optimizer:
+  name: "AdamW"
+  lr: 5.0e-5  # Lower LR for fine-tuning
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
+
+  # Discriminative learning rates for Phase 3 fine-tuning
+  use_discriminative_lr: true
+  lr_encoders: 1.0e-5  # Lower for pre-trained encoders
+  lr_fusion: 5.0e-5    # Medium for fusion layer
+  lr_head: 1.0e-4      # Higher for classification head
+
+# Learning Rate Scheduler
+scheduler:
+  name: "cosine"
+  warmup_epochs: 2
+  min_lr: 1.0e-7
+
+# Training Configuration
+training:
+  max_epochs: 20
+  batch_size: 8  # Smaller batch for full multi-modal with Enhanced RAG
+  gradient_accumulation_steps: 4  # Effective batch = 8 * 4 = 32 per GPU
+
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 8
+    monitor: "val_mean_auroc"
+    mode: "max"
+    min_delta: 0.0005
+
+  # Gradient clipping
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: "norm"
+
+  # Mixed precision
+  precision: "16-mixed"  # FP16 for memory efficiency
+
+  # Checkpointing
+  save_top_k: 5  # Save top 5 checkpoints
+  save_last: true
+  monitor: "val_mean_auroc"
+  mode: "max"
+  save_interval_epochs: 2
+
+# Data Configuration
+data:
+  # IMPORTANT: Point to your Enhanced RAG preprocessed data location
+  # The adapter will automatically detect and convert Enhanced RAG format
+  data_root: "/home/dev/Documents/Portfolio/MIMIC_Data/physionet.org/files/train_test_small_2"
+
+  # For single files, use these names:
+  train_file: "train_final.pt"
+  val_file: "val_final.pt"
+  test_file: "test_final.pt"
+
+  # For chunked files, the DataModule will auto-detect:
+  # - train_chunk_*.pt
+  # - val_chunk_*.pt
+  # - test_chunk_*.pt
+
+  # DataLoader settings
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+
+  # Data augmentation (for training only)
+  augmentation:
+    enabled: true
+    horizontal_flip_prob: 0.5
+    rotation_degrees: 10
+    color_jitter:
+      brightness: 0.2
+      contrast: 0.2
+
+  # Weighted sampling for class imbalance
+  use_weighted_sampler: false  # Can enable if needed
+
+# Logging Configuration
+logging:
+  experiment_name: "phase3_enhanced_rag"
+  log_dir: "logs"
+  tensorboard_dir: "tb_logs"
+  log_every_n_steps: 50
+
+  # What to log
+  log_lr: true
+  log_gradients: false
+  log_weights: false
+
+# Distributed Training
+distributed:
+  strategy: "ddp"
+  num_nodes: 1
+  devices: 1  # Start with single GPU, increase as needed
+  accelerator: "auto"  # Will use GPU if available
+
+# Compute Environment
+compute:
+  deterministic: false
+  benchmark: true
+  seed: 42
+
+# Class Names (CheXpert labels in Enhanced RAG adapter order)
+class_names:
+  - "No Finding"
+  - "Enlarged Cardiomediastinum"
+  - "Cardiomegaly"
+  - "Lung Opacity"
+  - "Lung Lesion"
+  - "Edema"
+  - "Consolidation"
+  - "Pneumonia"
+  - "Atelectasis"
+  - "Pneumothorax"
+  - "Pleural Effusion"
+  - "Pleural Other"
+  - "Fracture"
+  - "Support Devices"

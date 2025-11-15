@@ -460,6 +460,41 @@ class MIMICDataModule(pl.LightningDataModule):
         self.val_dataset = None
         self.test_dataset = None
 
+    def _get_data_path(self, split_name: str, filename: str) -> str:
+        """
+        Get data path, supporting both single files and chunked format
+
+        Args:
+            split_name: 'train', 'val', or 'test'
+            filename: Configured filename (e.g., 'train_final.pt')
+
+        Returns:
+            Path to data file or first chunk file
+        """
+        # Try single file first
+        single_file_path = self.data_root / filename
+        if single_file_path.exists():
+            logger.info(f"Found single file for {split_name}: {filename}")
+            return str(single_file_path)
+
+        # Try chunked format
+        # Look for files like train_chunk_*.pt or val_chunk_*.pt
+        chunk_pattern = f"{split_name}_chunk_*.pt"
+        chunk_files = sorted(self.data_root.glob(chunk_pattern))
+
+        if chunk_files:
+            logger.info(f"Found {len(chunk_files)} chunks for {split_name}")
+            # For chunked format, we need to create a special wrapper
+            # For now, return first chunk and let MIMICDataset handle it
+            # TODO: Implement proper multi-chunk loading
+            return str(chunk_files[0])
+
+        raise FileNotFoundError(
+            f"No data found for {split_name}. Looked for:\n"
+            f"  - Single file: {single_file_path}\n"
+            f"  - Chunked files: {self.data_root}/{chunk_pattern}"
+        )
+
     def setup(self, stage: Optional[str] = None):
         """
         Setup datasets for training/validation/testing
@@ -469,16 +504,16 @@ class MIMICDataModule(pl.LightningDataModule):
         """
         if stage == 'fit' or stage is None:
             # Training dataset
-            train_path = self.data_root / self.train_file
+            train_path = self._get_data_path('train', self.train_file)
             self.train_dataset = MIMICDataset(
-                data_path=str(train_path),
+                data_path=train_path,
                 augmentation=self.train_transform
             )
 
             # Validation dataset
-            val_path = self.data_root / self.val_file
+            val_path = self._get_data_path('val', self.val_file)
             self.val_dataset = MIMICDataset(
-                data_path=str(val_path),
+                data_path=val_path,
                 augmentation=self.val_transform
             )
 
@@ -487,9 +522,9 @@ class MIMICDataModule(pl.LightningDataModule):
 
         if stage == 'test' or stage is None:
             # Test dataset
-            test_path = self.data_root / self.test_file
+            test_path = self._get_data_path('test', self.test_file)
             self.test_dataset = MIMICDataset(
-                data_path=str(test_path),
+                data_path=test_path,
                 augmentation=self.val_transform
             )
 
