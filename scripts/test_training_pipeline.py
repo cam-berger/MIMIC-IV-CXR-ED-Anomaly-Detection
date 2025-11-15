@@ -161,12 +161,19 @@ def test_forward_pass(config: dict):
         with torch.no_grad():
             outputs = model(batch)
 
-        logger.info(f"✓ Output shape: {outputs.shape}")
-        logger.info(f"✓ Output range: [{outputs.min().item():.4f}, {outputs.max().item():.4f}]")
+        # Model returns dict, extract probabilities
+        if isinstance(outputs, dict):
+            probabilities = outputs['probabilities']
+            logger.info(f"✓ Model returned dict with keys: {list(outputs.keys())}")
+        else:
+            probabilities = outputs
+
+        logger.info(f"✓ Output shape: {probabilities.shape}")
+        logger.info(f"✓ Output range: [{probabilities.min().item():.4f}, {probabilities.max().item():.4f}]")
 
         # Verify output shape
-        assert outputs.shape == (config['training']['batch_size'], 14), "Wrong output shape"
-        assert torch.all((outputs >= 0) & (outputs <= 1)), "Outputs should be in [0, 1]"
+        assert probabilities.shape == (config['training']['batch_size'], 14), "Wrong output shape"
+        assert torch.all((probabilities >= 0) & (probabilities <= 1)), "Outputs should be in [0, 1]"
 
         print("\n" + "=" * 70)
         print("✅ Test 3 PASSED: Forward pass works correctly")
@@ -222,6 +229,12 @@ def test_training_step(config: dict):
         model.train()
         outputs = model(batch)
 
+        # Model returns dict, extract probabilities
+        if isinstance(outputs, dict):
+            probabilities = outputs['probabilities']
+        else:
+            probabilities = outputs
+
         # Extract labels
         class_names = config['class_names']
         labels_dict = batch['labels']
@@ -233,7 +246,7 @@ def test_training_step(config: dict):
                 labels_tensor[:, i] = labels_dict[class_name].float()
 
         # Compute loss
-        loss_dict = loss_fn(outputs, labels_tensor)
+        loss_dict = loss_fn(probabilities, labels_tensor)
 
         logger.info(f"✓ Total loss: {loss_dict['loss'].item():.4f}")
         if 'bce_loss' in loss_dict:
