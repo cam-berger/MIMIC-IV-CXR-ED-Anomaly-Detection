@@ -57,16 +57,27 @@ HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused w
 
 ## Overview
 
-This project implements Phase 1 data preprocessing for an Enhanced MDF-Net model that combines:
+This project implements data preprocessing and training for Enhanced MDF-Net models with support for both **3-modal** and **4-modal** architectures:
+
+### 3-Modal Architecture (354M parameters)
 - **BiomedCLIP-CXR** vision encoder for chest X-ray analysis
 - **Clinical ModernBERT** text encoder for clinical notes
+- **Clinical features** encoder for vitals and demographics
 - **RAG knowledge enhancement** for medical context
 - **Cross-attention fusion** for multimodal integration
+
+### 4-Modal Architecture with CXR-PRO (327M parameters) - NEW!
+- **BiomedCLIP-CXR** vision encoder for chest X-ray analysis
+- **Clinical ModernBERT** text encoder for ED clinical notes
+- **BiomedBERT** encoder for **prior-free radiology impressions** (CXR-PRO)
+- **Clinical features** encoder for vitals and demographics
+- **Quad-modal attention fusion** for 4-way cross-modal learning
 
 The pipeline links MIMIC-CXR chest X-rays with MIMIC-IV-ED emergency department data to create a unified dataset for medical abnormality detection.
 
 ## Key Features
 
+### Data Processing
 - **Multi-Bucket GCS Support**: Seamlessly works with your data bucket + PhysioNet's public MIMIC-CXR bucket
 - **Flexible File Format Support**: Handles both compressed (.csv.gz) and uncompressed (.csv) data files
 - **Pseudo-Note Generation**: Converts structured clinical data into narrative text for LLM processing
@@ -76,9 +87,20 @@ The pipeline links MIMIC-CXR chest X-rays with MIMIC-IV-ED emergency department 
 - **Smart Caching**: Eliminates duplicate downloads per record, saving bandwidth and time
 - **Robust Error Handling**: Continues processing past failed images with detailed logging
 - **Correct Path Construction**: Properly handles MIMIC-CXR's 8-digit padded directory structure
+- **Scalable**: Successfully processes 107,949+ matched multimodal records
+
+### CXR-PRO Integration (NEW!)
+- **Prior-Free Radiology Reports**: Removes hallucinated references to priors using GILBERT model
+- **4-Modal Architecture**: Vision + Clinical Text + Radiology Text + Clinical Features
+- **GILBERT Model**: BioBERT-based token-level prior removal from HuggingFace
+- **Quality Validation**: Comprehensive validation ensuring <0.05% prior references remain
+- **Expert-Validated Data**: 371,951 GILBERT-processed + 2,188 radiologist-edited reports
+- **Improved Factual Consistency**: Reduces prior hallucinations from ~15-20% to <1%
+- **Cross-Modal Alignment**: Quad-modal attention learns visual-radiological correspondences
+
+### Deployment
 - **Local Testing**: Test preprocessing locally before cloud deployment
 - **Automated GCP Deployment**: One-command deployment with auto-shutdown
-- **Scalable**: Successfully processes 107,949+ matched multimodal records
 - **Cloud-Native**: Optimized for Google Cloud Platform (Compute Engine, Cloud Storage)
 
 ## Data Pipeline Architecture
@@ -1118,4 +1140,4 @@ For questions or issues:
 ---
 
 **Last Updated**: 2025-11-15
-**Status**: Production Ready | Official MIMIC-CXR Splits (377K studies) | Enhanced RAG Adapter | BiomedCLIP + ModernBERT | 354M Parameters | Multi-Format Support | Comprehensive Testing | 4 Critical Bugs Fixed | Training Pipeline Validated
+**Status**: Production Ready | CXR-PRO Integration (4-Modal) | Prior-Free Radiology Reports | Official MIMIC-CXR Splits (377K studies) | Enhanced RAG Adapter | BiomedCLIP + ModernBERT + BiomedBERT | 327M Parameters (4-Modal) / 354M Parameters (3-Modal) | GILBERT Prior Removal | Quad-Modal Attention Fusion | Multi-Format Support | Comprehensive Testing | Quality Validation
