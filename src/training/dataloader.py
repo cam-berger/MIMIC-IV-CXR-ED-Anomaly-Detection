@@ -534,7 +534,10 @@ class MIMICDataModule(pl.LightningDataModule):
         """Create training DataLoader"""
 
         # Create sampler
-        if self.use_weighted_sampler and not isinstance(self.trainer, pl.Trainer) or self.trainer.world_size == 1:
+        # Check if we're in a distributed training context
+        is_distributed = hasattr(self, 'trainer') and self.trainer is not None and self.trainer.world_size > 1
+
+        if self.use_weighted_sampler and not is_distributed:
             # Weighted sampler for class imbalance (only for single GPU)
             sample_weights = self.train_dataset.compute_sample_weights()
             sampler = WeightedRandomSampler(
@@ -543,7 +546,7 @@ class MIMICDataModule(pl.LightningDataModule):
                 replacement=True
             )
             shuffle = False
-        elif hasattr(self, 'trainer') and self.trainer.world_size > 1:
+        elif is_distributed:
             # Distributed sampler for multi-GPU
             sampler = DistributedSampler(
                 self.train_dataset,
