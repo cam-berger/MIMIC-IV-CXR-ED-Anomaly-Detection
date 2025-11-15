@@ -16,6 +16,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional, Tuple, List
 import math
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class VisionEncoder(nn.Module):
@@ -100,8 +103,8 @@ class VisionEncoder(nn.Module):
 
 class TextEncoder(nn.Module):
     """
-    Clinical ModernBERT Text Encoder
-    8192-token context for RAG-enhanced pseudo-notes
+    Clinical Text Encoder
+    Supports modern long-context models and falls back to medical BERT
     """
 
     def __init__(self, model_name: str = 'answerdotai/ModernBERT-base',
@@ -115,11 +118,35 @@ class TextEncoder(nn.Module):
 
         try:
             from transformers import AutoModel
-            self.encoder = AutoModel.from_pretrained(model_name)
+
+            # Try to load the specified model
+            try:
+                self.encoder = AutoModel.from_pretrained(model_name, trust_remote_code=True)
+                logger.info(f"Loaded text encoder: {model_name}")
+            except (ValueError, OSError, KeyError) as e:
+                # ModernBERT or other new models might not be supported
+                # Fall back to well-supported medical BERT models
+                import warnings
+                warnings.warn(
+                    f"Failed to load {model_name} ({e}). "
+                    f"Falling back to microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext"
+                )
+
+                # Try BiomedBERT first (medical domain, well-supported)
+                try:
+                    fallback_model = 'microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext'
+                    self.encoder = AutoModel.from_pretrained(fallback_model)
+                    logger.info(f"Loaded fallback text encoder: {fallback_model}")
+                except Exception as e2:
+                    # If BiomedBERT fails, use standard BERT-base
+                    warnings.warn(f"Failed to load BiomedBERT ({e2}). Falling back to bert-base-uncased")
+                    self.encoder = AutoModel.from_pretrained('bert-base-uncased')
+                    logger.info("Loaded fallback text encoder: bert-base-uncased")
+
         except ImportError:
             raise ImportError("Please install transformers: pip install transformers")
 
-        self.output_dim = self.encoder.config.hidden_size  # 768
+        self.output_dim = self.encoder.config.hidden_size  # 768 for BERT-base models
 
         if freeze:
             for param in self.encoder.parameters():
