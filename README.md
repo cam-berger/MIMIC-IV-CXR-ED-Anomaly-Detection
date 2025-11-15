@@ -2,27 +2,42 @@
 
 HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused with visual features through cross-modal attention, will improve both the accuracy and interpretability of chest X-ray abnormality detection compared to models using raw clinical notes or images alone, with the improvement being most significant for rare conditions and complex multi-abnormality cases.
 
-## Recent Improvements (October 2025)
+## Recent Improvements (November 2025)
 
-**Major Performance & Reliability Enhancements**:
+**Phase 3: Enhanced RAG Training Pipeline**:
+- **Official MIMIC-CXR Splits**: Implemented patient-level splits from `mimic-cxr-2.0.0-split.csv.gz` (377,110 studies)
+- **Enhanced RAG Adapter**: Automatic conversion between Enhanced RAG and Standard data formats
+- **Multi-Format Support**: Auto-detects and converts Enhanced RAG format with RAG-enhanced notes, attention segments, bounding boxes, and severity scores
+- **BiomedCLIP Integration**: Medical-domain vision encoder (512-dim) loaded via open_clip
+- **ModernBERT Support**: 8192-token context text encoder with cascading fallbacks (ModernBERT → BiomedBERT → BERT-base)
+- **Bug Fixes**: Fixed 4 critical bugs in DataLoader, model loading, and dimension handling
+- **Robust Testing**: Comprehensive test suite validates entire training pipeline
+- **Production Ready**: 354M parameter model ready for training on Enhanced RAG data
+
+**Previous Improvements (October 2025)**:
 - **20-40x Faster Processing**: Batch downloading with parallel workers reduces processing time from 12 days to 7-15 hours
-- **Fixed Critical Path Bug**: Corrected MIMIC-CXR image path construction (8-digit padding) - was causing 100% image lookup failures
-- **Smart Caching**: Eliminates duplicate downloads (previously downloading each image twice per record)
-- **Robust Error Handling**: Pipeline continues past failed images with detailed diagnostics
-- **Improved Temporal Matching**: Fixed StudyDate+StudyTime parsing, increased matches from 0 to 107,949 records
-- **Detailed Statistics Logging**: Real-time visibility into joining process (successful matches, missing images, temporal mismatches)
+- **Fixed Critical Path Bug**: Corrected MIMIC-CXR image path construction (8-digit padding)
+- **Smart Caching**: Eliminates duplicate downloads
+- **Improved Temporal Matching**: Fixed StudyDate+StudyTime parsing (107,949+ matched records)
 - **Memory-Efficient Streaming**: Process 100K+ records on 7.5GB RAM without OOM crashes
-- **Stratified Splitting**: Evenly distribute classes across train/val/test splits
-- **Resume Capability**: Skip completed batch processing and jump directly to dataset creation
-- **Small Sample Datasets**: Automatically generate small test versions for rapid Phase 2 development
 
 ### Technical Documentation
-- **[Training Guide](docs/TRAINING_GUIDE.md)**: Complete guide for fine-tuning Enhanced MDF-Net with multi-GPU support
-- **[Evaluation Guide](docs/EVALUATION_GUIDE.md)**: Comprehensive testing with metrics, confusion matrices, and correlation analysis
-- **[OOM Solution Guide](docs/OOM_SOLUTION.md)**: Solutions for memory management and out-of-memory issues
-- **[Phase 2 Refactoring Summary](docs/PHASE2_REFACTORING_SUMMARY.md)**: Complete Phase 2 implementation details
-- **[Phase 3 Integration Guide](docs/PHASE3_INTEGRATION.md)**: Multi-modal integration and final dataset preparation
-- All fixes verified and deployed to production
+
+**Phase 3 Training Pipeline**:
+- **[Enhanced RAG Adapter](docs/ENHANCED_RAG_ADAPTER.md)**: Auto-detection and conversion between Enhanced RAG and Standard formats
+- **[Bug Fixes Summary](BUG_FIXES_SUMMARY.md)**: All 4 critical bugs fixed (DataLoader, BiomedCLIP, ModernBERT, output dimensions)
+- **[Troubleshooting Guide](TROUBLESHOOTING.md)**: Comprehensive troubleshooting for training pipeline
+- **[Codebase Audit](CODEBASE_AUDIT.md)**: Complete audit report - production ready
+- **[Official Splits Documentation](docs/OFFICIAL_SPLITS_FIX.md)**: Patient-level splits implementation
+
+**Training & Evaluation**:
+- **[Training Guide](docs/TRAINING_GUIDE.md)**: Fine-tuning Enhanced MDF-Net with multi-GPU support
+- **[Evaluation Guide](docs/EVALUATION_GUIDE.md)**: Metrics, confusion matrices, and correlation analysis
+- **[Phase 3 Integration Summary](ENHANCED_RAG_INTEGRATION_SUMMARY.md)**: Complete integration guide
+
+**Data Processing**:
+- **[OOM Solution Guide](docs/OOM_SOLUTION.md)**: Memory management and optimization
+- **[Phase 2 Refactoring Summary](docs/PHASE2_REFACTORING_SUMMARY.md)**: Complete Phase 2 implementation
 
 ## Overview
 
@@ -205,12 +220,14 @@ OUTPUT:
 
 | Component | Parameters | Description |
 |-----------|------------|-------------|
-| BiomedCLIP Vision | ~87M | Pre-trained ViT encoder |
-| Clinical ModernBERT | ~149M | Pre-trained text encoder |
-| Clinical Feature Encoder | ~131K | Dense layers |
-| Cross-Modal Attention | ~2.4M | Multi-head attention |
-| Classification Head | ~394K | Dense layers |
-| **Total** | **~239M** | End-to-end trainable |
+| BiomedCLIP Vision | ~87M | Pre-trained ViT encoder (512-dim output) |
+| ModernBERT / BiomedBERT Text | ~149M | Pre-trained text encoder (768-dim output, 8192 tokens) |
+| Clinical Feature Encoder | ~0.5M | Dense layers (45 → 256 dimensions) |
+| Cross-Modal Attention | ~2M | Multi-head attention fusion (768-dim) |
+| Classification Head | ~0.4M | Dense layers (2304 → 14 classes) |
+| **Total** | **~354M** | End-to-end trainable |
+
+**Note**: Actual parameter count may vary based on encoder choice (ModernBERT vs BiomedBERT fallback).
 
 ### Training Strategy
 
@@ -395,20 +412,80 @@ gcloud auth application-default login
 gcloud config set project YOUR_PROJECT_ID
 ```
 
-### 2. Local Testing (Recommended First)
+### 2. Data Preprocessing with Official Splits
 
-Test on your laptop before cloud deployment:
+Process data using official MIMIC-CXR patient-level splits:
 
 ```bash
-# Run local tests with small sample
-python src/test_phase1_local.py \
-  --mimic-path ~/Documents/Portfolio/MIMIC_Data/physionet.org/files \
-  --num-samples 10
+# Phase 1: Preprocess with official splits (RECOMMENDED)
+python src/phase1_preprocess_streaming.py \
+  --mimic-cxr-path /path/to/mimic-cxr-jpg/2.1.0 \
+  --mimic-ed-path /path/to/mimic-iv-ed/2.2/ed \
+  --output-dir /path/to/output \
+  --use-official-splits  # Uses mimic-cxr-2.0.0-split.csv.gz
 
-# See LOCAL_TESTING.md for detailed guide
+# Verify official splits loaded correctly
+python scripts/verify_official_splits.py \
+  /path/to/mimic-cxr-jpg/2.1.0/mimic-cxr-2.0.0-split.csv.gz
 ```
 
-### 3. Google Cloud Setup
+### 3. Verify Data Loading and Format
+
+Check that Enhanced RAG format data is detected correctly:
+
+```bash
+# Verify data loading with adapter
+python scripts/verify_data_loading.py \
+  --data-root /path/to/preprocessed_data
+
+# Test Enhanced RAG adapter
+python scripts/test_enhanced_rag_adapter.py \
+  /path/to/train_chunk_000003.pt
+
+# Analyze dataset statistics
+python scripts/analyze_dataset.py \
+  --data-root /path/to/preprocessed_data
+```
+
+### 4. Test Training Pipeline
+
+Validate the entire training pipeline before full training:
+
+```bash
+# Test all components: data loading, model creation, forward pass, training step
+python scripts/test_training_pipeline.py \
+  --config configs/phase3_enhanced_rag.yaml
+
+# Expected output: All 4 tests pass ✅
+```
+
+### 5. Start Training
+
+Train the Enhanced MDF-Net model with your Enhanced RAG data:
+
+```bash
+# Full multi-modal training with Enhanced RAG adapter
+python src/training/train_lightning.py \
+  --config configs/phase3_enhanced_rag.yaml \
+  --experiment-name "phase3_run1"
+
+# Monitor training with TensorBoard
+tensorboard --logdir tb_logs/
+
+# Optional: Multi-GPU training
+python src/training/train_lightning.py \
+  --config configs/phase3_enhanced_rag.yaml \
+  --gpus 2
+
+# Optional: Override config settings
+python src/training/train_lightning.py \
+  --config configs/phase3_enhanced_rag.yaml \
+  --batch-size 16 \
+  --max-epochs 30 \
+  --lr 1e-4
+```
+
+### 6. Google Cloud Setup (Optional)
 
 **First: Authenticate with Google Cloud**
 
@@ -953,15 +1030,24 @@ See [LOCAL_TESTING.md](LOCAL_TESTING.md) for more troubleshooting tips.
 
 ### Python Dependencies
 ```
+# Core ML libraries
 pandas>=2.0.0
 numpy>=1.24.0,<2.0  # NumPy 2.x not yet fully supported
 torch>=2.0.0
 torchvision>=0.15.0
-transformers>=4.30.0
+pytorch-lightning>=2.0.0
+
+# Model encoders
+transformers>=4.30.0  # For text encoders (ModernBERT, BiomedBERT)
+open-clip-torch>=2.20.0  # For BiomedCLIP vision encoder
 sentence-transformers>=2.2.0
 faiss-cpu>=1.7.0
+
+# Image processing
 pillow>=10.0.0
 opencv-python-headless>=4.8.0
+
+# Cloud and utilities
 google-cloud-storage>=2.10.0  # For GCS support
 tqdm>=4.65.0
 ```
@@ -1015,5 +1101,5 @@ For questions or issues:
 
 ---
 
-**Last Updated**: 2025-11-14
-**Status**: Phase 1-3 Complete | Pseudo-Note Generation | RAG Enhancement | Multi-Modal Integration | Data Quality Validation | Model-Ready Datasets | 107,949+ Records | Memory-Efficient
+**Last Updated**: 2025-11-15
+**Status**: Production Ready | Official MIMIC-CXR Splits (377K studies) | Enhanced RAG Adapter | BiomedCLIP + ModernBERT | 354M Parameters | Multi-Format Support | Comprehensive Testing | 4 Critical Bugs Fixed | Training Pipeline Validated

@@ -16,6 +16,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional, Tuple, List
 import math
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class VisionEncoder(nn.Module):
@@ -24,26 +27,99 @@ class VisionEncoder(nn.Module):
     Pre-trained Vision Transformer for chest X-ray analysis
     """
 
-    def __init__(self, model_name: str = 'microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224',
+    def __init__(self, model_name: str = 'hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224',
                  freeze: bool = True):
         """
         Args:
-            model_name: HuggingFace model identifier
+            model_name: Model identifier (open_clip format with 'hf-hub:' prefix for HuggingFace)
             freeze: Whether to freeze encoder weights
         """
         super().__init__()
 
+        # BiomedCLIP uses open_clip library
         try:
-            from transformers import CLIPVisionModel
-            self.encoder = CLIPVisionModel.from_pretrained(model_name)
-        except ImportError:
-            raise ImportError("Please install transformers: pip install transformers")
+            import open_clip
+            # Load BiomedCLIP from HuggingFace Hub
+            # Format: model_name='hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'
+            self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+                model_name=model_name
+            )
+            self.encoder = self.model.visual  # Get just the vision encoder
 
-        self.output_dim = self.encoder.config.hidden_size  # 768
+            # Get output dimension from the model (try multiple attributes)
+            self.output_dim = self._get_output_dim(self.model)
+            logger.info(f"Loaded vision encoder with output dim: {self.output_dim}")
+
+        except ImportError:
+            raise ImportError(
+                "Please install open_clip: pip install open-clip-torch\n"
+                "BiomedCLIP requires open_clip, not transformers"
+            )
+        except Exception as e:
+            # Fallback to standard CLIP if BiomedCLIP fails
+            import warnings
+            warnings.warn(f"Failed to load BiomedCLIP ({e}), falling back to standard CLIP")
+            try:
+                import open_clip
+                self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+                    'ViT-B-16', pretrained='openai'
+                )
+                self.encoder = self.model.visual
+                self.output_dim = self._get_output_dim(self.model)
+                logger.info(f"Loaded fallback CLIP with output dim: {self.output_dim}")
+            except:
+                raise RuntimeError(
+                    "Failed to load both BiomedCLIP and standard CLIP. "
+                    "Please install open-clip-torch: pip install open-clip-torch"
+                )
 
         if freeze:
             for param in self.encoder.parameters():
                 param.requires_grad = False
+
+    def _get_output_dim(self, model) -> int:
+        """
+        Get output dimension from open_clip model
+
+        Args:
+            model: open_clip model
+
+        Returns:
+            Output dimension (typically 512 or 768)
+        """
+        # Try multiple ways to get the dimension
+
+        # Method 1: Check if visual encoder has output_dim
+        if hasattr(model.visual, 'output_dim'):
+            return model.visual.output_dim
+
+        # Method 2: Check model's embed_dim (common in CLIP models)
+        if hasattr(model, 'embed_dim'):
+            return model.embed_dim
+
+        # Method 3: Check visual.embed_dim
+        if hasattr(model.visual, 'embed_dim'):
+            return model.visual.embed_dim
+
+        # Method 4: Check visual.num_features (timm models)
+        if hasattr(model.visual, 'num_features'):
+            return model.visual.num_features
+
+        # Method 5: Run a dummy forward pass to infer dimension
+        try:
+            with torch.no_grad():
+                dummy_input = torch.randn(1, 3, 224, 224)
+                dummy_output = model.visual(dummy_input)
+                if isinstance(dummy_output, torch.Tensor):
+                    output_dim = dummy_output.shape[-1]
+                    logger.info(f"Inferred output dimension from forward pass: {output_dim}")
+                    return output_dim
+        except Exception as e:
+            logger.warning(f"Failed to infer dimension from forward pass: {e}")
+
+        # Default fallback (typical CLIP dimension)
+        logger.warning("Could not determine output dimension, defaulting to 512")
+        return 512
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         """
@@ -51,14 +127,17 @@ class VisionEncoder(nn.Module):
             images: [B, 3, 518, 518] - Preprocessed chest X-rays
 
         Returns:
-            vision_features: [B, 768] - Vision embeddings
+            vision_features: [B, output_dim] - Vision embeddings (512 for BiomedCLIP)
         """
         # BiomedCLIP expects 224x224, so resize
         images_resized = F.interpolate(images, size=(224, 224), mode='bilinear', align_corners=False)
 
-        outputs = self.encoder(pixel_values=images_resized)
-        # Use pooled output (CLS token)
-        vision_features = outputs.pooler_output  # [B, 768]
+        # Normalize images to [-1, 1] range expected by CLIP
+        # Assuming input is already in [0, 1] range from preprocessing
+        images_normalized = images_resized * 2.0 - 1.0
+
+        # open_clip vision encoder takes tensor directly
+        vision_features = self.encoder(images_normalized)  # [B, output_dim]
 
         return vision_features
 
@@ -70,8 +149,8 @@ class VisionEncoder(nn.Module):
 
 class TextEncoder(nn.Module):
     """
-    Clinical ModernBERT Text Encoder
-    8192-token context for RAG-enhanced pseudo-notes
+    Clinical Text Encoder
+    Supports modern long-context models and falls back to medical BERT
     """
 
     def __init__(self, model_name: str = 'answerdotai/ModernBERT-base',
@@ -85,11 +164,35 @@ class TextEncoder(nn.Module):
 
         try:
             from transformers import AutoModel
-            self.encoder = AutoModel.from_pretrained(model_name)
+
+            # Try to load the specified model
+            try:
+                self.encoder = AutoModel.from_pretrained(model_name, trust_remote_code=True)
+                logger.info(f"Loaded text encoder: {model_name}")
+            except (ValueError, OSError, KeyError) as e:
+                # ModernBERT or other new models might not be supported
+                # Fall back to well-supported medical BERT models
+                import warnings
+                warnings.warn(
+                    f"Failed to load {model_name} ({e}). "
+                    f"Falling back to microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext"
+                )
+
+                # Try BiomedBERT first (medical domain, well-supported)
+                try:
+                    fallback_model = 'microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext'
+                    self.encoder = AutoModel.from_pretrained(fallback_model)
+                    logger.info(f"Loaded fallback text encoder: {fallback_model}")
+                except Exception as e2:
+                    # If BiomedBERT fails, use standard BERT-base
+                    warnings.warn(f"Failed to load BiomedBERT ({e2}). Falling back to bert-base-uncased")
+                    self.encoder = AutoModel.from_pretrained('bert-base-uncased')
+                    logger.info("Loaded fallback text encoder: bert-base-uncased")
+
         except ImportError:
             raise ImportError("Please install transformers: pip install transformers")
 
-        self.output_dim = self.encoder.config.hidden_size  # 768
+        self.output_dim = self.encoder.config.hidden_size  # 768 for BERT-base models
 
         if freeze:
             for param in self.encoder.parameters():
@@ -350,6 +453,7 @@ class EnhancedMDFNet(nn.Module):
         self.text_encoder = None
         self.clinical_encoder = None
 
+        # Default dimensions (used for dummy features if modality is missing)
         vision_dim = 768
         text_dim = 768
         clinical_dim = 256
@@ -367,6 +471,11 @@ class EnhancedMDFNet(nn.Module):
                 input_dim=clinical_feature_dim,
                 output_dim=clinical_dim
             )
+
+        # Store dimensions for creating dummy features
+        self.vision_dim = vision_dim
+        self.text_dim = text_dim
+        self.clinical_dim = clinical_dim
 
         # Fusion layer
         self.fusion_layer = CrossModalAttention(
@@ -426,11 +535,11 @@ class EnhancedMDFNet(nn.Module):
         device = next(self.parameters()).device
 
         if vision_features is None:
-            vision_features = torch.zeros(batch_size, 768, device=device)
+            vision_features = torch.zeros(batch_size, self.vision_dim, device=device)
         if text_features is None:
-            text_features = torch.zeros(batch_size, 768, device=device)
+            text_features = torch.zeros(batch_size, self.text_dim, device=device)
         if clinical_features is None:
-            clinical_features = torch.zeros(batch_size, 256, device=device)
+            clinical_features = torch.zeros(batch_size, self.clinical_dim, device=device)
 
         # Fuse modalities
         fused_features = self.fusion_layer(vision_features, text_features, clinical_features)

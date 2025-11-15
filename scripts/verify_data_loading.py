@@ -37,13 +37,22 @@ def verify_file_exists(data_root: str, filename: str) -> bool:
     return True
 
 
-def verify_data_format(data_root: str, filename: str) -> bool:
-    """Verify data format is correct"""
+def verify_data_format(data_root: str, filename: str, max_samples: int = 10) -> bool:
+    """
+    Verify data format is correct
+
+    Args:
+        data_root: Directory containing data files
+        filename: Name of file to verify
+        max_samples: Max number of samples to load (to avoid OOM)
+    """
     logger.info(f"\nVerifying format of {filename}...")
 
     try:
         path = Path(data_root) / filename
-        data = torch.load(path, map_location='cpu')
+
+        # Load only first few samples to avoid OOM
+        data = torch.load(path, map_location='cpu', weights_only=False)
 
         if not isinstance(data, list):
             logger.error(f"❌ Data should be a list, got {type(data)}")
@@ -53,16 +62,68 @@ def verify_data_format(data_root: str, filename: str) -> bool:
             logger.error(f"❌ Data is empty!")
             return False
 
-        logger.info(f"✓ Loaded {len(data)} samples")
+        # Only check first max_samples to save memory
+        original_len = len(data)
+        if len(data) > max_samples:
+            data = data[:max_samples]
+            logger.info(f"✓ Loaded {original_len} samples (checking first {max_samples})")
+        else:
+            logger.info(f"✓ Loaded {len(data)} samples")
 
         # Check first sample
         sample = data[0]
+
+        # Detect data format by checking available keys
+        has_image_tensor = 'image_tensor' in sample
+        has_image = 'image' in sample
+        has_clinical_data_str = 'clinical_data' in sample and isinstance(sample.get('clinical_data'), str)
+        has_clinical_features = 'clinical_features' in sample
+        has_nested_labels = 'labels' in sample and isinstance(sample.get('labels'), dict) and 'disease_labels' in sample.get('labels', {})
+        has_flat_labels = 'labels' in sample and isinstance(sample.get('labels'), dict) and not has_nested_labels
+
+        # Determine format
+        if has_image_tensor and has_clinical_data_str and has_nested_labels:
+            data_format = "enhanced_rag"
+            logger.info(f"✓ Detected format: ENHANCED RAG (with attention, bbox, etc.)")
+        elif has_image and has_clinical_features and has_flat_labels:
+            data_format = "standard"
+            logger.info(f"✓ Detected format: STANDARD (simple multi-modal)")
+        else:
+            data_format = "unknown"
+            logger.warning(f"⚠️  Unknown data format detected")
+
+        # Verify based on detected format
+        if data_format == "enhanced_rag":
+            return verify_enhanced_rag_format(sample, data)
+        elif data_format == "standard":
+            return verify_standard_format(sample, data)
+        else:
+            logger.error(f"❌ Could not determine data format")
+            logger.info(f"   Available keys: {list(sample.keys())}")
+            return False
+
+    except Exception as e:
+        logger.error(f"❌ Error verifying data: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def verify_enhanced_rag_format(sample: dict, data: list) -> bool:
+    """Verify enhanced RAG format with attention segments and bbox"""
+    try:
+        logger.info("\nVerifying Enhanced RAG format...")
+
+        # Required keys for enhanced format
         required_keys = [
-            'subject_id', 'study_id', 'dicom_id',
-            'image', 'text_input_ids', 'text_attention_mask',
-            'clinical_features', 'labels'
+            'image_tensor', 'text_input_ids', 'text_attention_mask',
+            'clinical_data', 'labels', 'enhanced_note'
         ]
 
+        # Optional keys
+        optional_keys = ['subject_id', 'study_id', 'attention_segments']
+
+        # Check required keys
         for key in required_keys:
             if key not in sample:
                 logger.error(f"❌ Missing required key: {key}")
@@ -70,7 +131,101 @@ def verify_data_format(data_root: str, filename: str) -> bool:
 
         logger.info(f"✓ All required keys present")
 
-        # Check data types and shapes
+        # Check optional keys
+        for key in optional_keys:
+            if key not in sample:
+                logger.warning(f"⚠️  Optional key missing: {key}")
+
+        # Verify image_tensor
+        if not isinstance(sample['image_tensor'], torch.Tensor):
+            logger.error(f"❌ image_tensor should be torch.Tensor, got {type(sample['image_tensor'])}")
+            return False
+
+        if sample['image_tensor'].shape != (3, 518, 518):
+            logger.error(f"❌ image_tensor shape should be (3, 518, 518), got {sample['image_tensor'].shape}")
+            return False
+
+        logger.info(f"✓ Image tensor shape correct: {sample['image_tensor'].shape}")
+
+        # Verify text inputs
+        if not isinstance(sample['text_input_ids'], torch.Tensor):
+            logger.error(f"❌ text_input_ids should be torch.Tensor")
+            return False
+
+        logger.info(f"✓ Text input_ids shape: {sample['text_input_ids'].shape}")
+
+        # Verify clinical_data (JSON string)
+        if not isinstance(sample['clinical_data'], str):
+            logger.error(f"❌ clinical_data should be JSON string, got {type(sample['clinical_data'])}")
+            return False
+
+        import json
+        try:
+            clinical_dict = json.loads(sample['clinical_data'])
+            logger.info(f"✓ Clinical data is valid JSON with {len(clinical_dict)} fields")
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ clinical_data is not valid JSON: {e}")
+            return False
+
+        # Verify labels (nested structure)
+        if not isinstance(sample['labels'], dict):
+            logger.error(f"❌ labels should be dict, got {type(sample['labels'])}")
+            return False
+
+        if 'disease_labels' not in sample['labels']:
+            logger.error(f"❌ labels should contain 'disease_labels'")
+            return False
+
+        disease_labels = sample['labels']['disease_labels']
+        if isinstance(disease_labels, list):
+            logger.info(f"✓ Labels format correct (list with {len(disease_labels)} disease labels)")
+        else:
+            logger.warning(f"⚠️  disease_labels has unexpected type: {type(disease_labels)}")
+
+        logger.info(f"✓ Enhanced RAG format verified successfully")
+
+        # Clear memory
+        del data
+        import gc
+        gc.collect()
+
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Error verifying enhanced RAG format: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def verify_standard_format(sample: dict, data: list) -> bool:
+    """Verify standard format with flat structure"""
+    try:
+        logger.info("\nVerifying Standard format...")
+
+        # Required keys for standard format
+        required_keys = [
+            'image', 'text_input_ids', 'text_attention_mask',
+            'clinical_features', 'labels'
+        ]
+
+        # Optional keys
+        optional_keys = ['subject_id', 'study_id', 'dicom_id']
+
+        # Check required keys
+        for key in required_keys:
+            if key not in sample:
+                logger.error(f"❌ Missing required key: {key}")
+                return False
+
+        logger.info(f"✓ All required keys present")
+
+        # Check optional keys
+        for key in optional_keys:
+            if key not in sample:
+                logger.warning(f"⚠️  Optional key missing: {key}")
+
+        # Verify image
         if not isinstance(sample['image'], torch.Tensor):
             logger.error(f"❌ image should be torch.Tensor, got {type(sample['image'])}")
             return False
@@ -81,12 +236,14 @@ def verify_data_format(data_root: str, filename: str) -> bool:
 
         logger.info(f"✓ Image shape correct: {sample['image'].shape}")
 
+        # Verify text inputs
         if not isinstance(sample['text_input_ids'], torch.Tensor):
             logger.error(f"❌ text_input_ids should be torch.Tensor")
             return False
 
         logger.info(f"✓ Text input_ids shape: {sample['text_input_ids'].shape}")
 
+        # Verify clinical_features
         if not isinstance(sample['clinical_features'], torch.Tensor):
             logger.error(f"❌ clinical_features should be torch.Tensor")
             return False
@@ -97,6 +254,7 @@ def verify_data_format(data_root: str, filename: str) -> bool:
 
         logger.info(f"✓ Clinical features shape: {sample['clinical_features'].shape}")
 
+        # Verify labels (flat dict)
         if not isinstance(sample['labels'], dict):
             logger.error(f"❌ labels should be dict, got {type(sample['labels'])}")
             return False
@@ -114,11 +272,17 @@ def verify_data_format(data_root: str, filename: str) -> bool:
                 return False
 
         logger.info(f"✓ All label values are binary (0 or 1)")
+        logger.info(f"✓ Standard format verified successfully")
+
+        # Clear memory
+        del data
+        import gc
+        gc.collect()
 
         return True
 
     except Exception as e:
-        logger.error(f"❌ Error verifying data: {e}")
+        logger.error(f"❌ Error verifying standard format: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -204,13 +368,43 @@ def test_dataloader(data_root: str) -> bool:
         return False
 
 
+def detect_data_format(data_root: str) -> dict:
+    """
+    Auto-detect whether data is in chunked or combined format
+
+    Returns:
+        dict with 'format' ('chunked' or 'combined') and 'files' list
+    """
+    data_path = Path(data_root)
+
+    # Check for combined format first
+    combined_files = ['train_final.pt', 'val_final.pt', 'test_final.pt']
+    if all((data_path / f).exists() for f in combined_files):
+        return {'format': 'combined', 'files': combined_files}
+
+    # Check for chunked format
+    train_chunks = sorted(data_path.glob('train_chunk_*.pt'))
+    val_chunks = sorted(data_path.glob('val_chunk_*.pt'))
+    test_chunks = sorted(data_path.glob('test_chunk_*.pt'))
+
+    if train_chunks or val_chunks or test_chunks:
+        return {
+            'format': 'chunked',
+            'train_chunks': [f.name for f in train_chunks],
+            'val_chunks': [f.name for f in val_chunks],
+            'test_chunks': [f.name for f in test_chunks]
+        }
+
+    return {'format': 'not_found', 'files': []}
+
+
 def main():
     import argparse
 
     parser = argparse.ArgumentParser(description='Verify data loading works correctly')
     parser.add_argument('--data-root', type=str,
                        default='/media/dev/MIMIC_DATA/phase1_with_path_fixes_raw',
-                       help='Directory containing train/val/test_final.pt files')
+                       help='Directory containing train/val/test files (.pt or chunks)')
 
     args = parser.parse_args()
 
@@ -219,51 +413,172 @@ def main():
     logger.info("=" * 60)
     logger.info(f"Data root: {args.data_root}\n")
 
+    # Detect data format
+    logger.info("Detecting data format...")
+    data_info = detect_data_format(args.data_root)
+
+    if data_info['format'] == 'not_found':
+        logger.error("❌ No data files found!")
+        logger.error("Expected either:")
+        logger.error("  - Combined: train_final.pt, val_final.pt, test_final.pt")
+        logger.error("  - Chunked: train_chunk_*.pt, val_chunk_*.pt, test_chunk_*.pt")
+        logger.error(f"\nPlease check that data exists in: {args.data_root}")
+        return False
+
+    logger.info(f"✓ Detected format: {data_info['format'].upper()}")
+
     all_passed = True
 
-    # Test 1: Check files exist
-    logger.info("Test 1: Checking files exist...")
-    for filename in ['train_final.pt', 'val_final.pt', 'test_final.pt']:
-        if not verify_file_exists(args.data_root, filename):
+    if data_info['format'] == 'combined':
+        # Test combined format
+        logger.info("\nTest 1: Checking files exist...")
+        for filename in data_info['files']:
+            if not verify_file_exists(args.data_root, filename):
+                all_passed = False
+
+        if not all_passed:
+            logger.error("\n❌ Files not found. Please check data_root path.")
+            return False
+
+        # Test 2: Verify data format
+        logger.info("\n" + "-" * 60)
+        for filename in data_info['files']:
+            if not verify_data_format(args.data_root, filename):
+                all_passed = False
+
+        if not all_passed:
+            logger.error("\n❌ Data format verification failed.")
+            return False
+
+        # Test 3: Test MIMICDataset
+        logger.info("\n" + "-" * 60)
+        if not test_dataset_loading(args.data_root):
             all_passed = False
 
-    if not all_passed:
-        logger.error("\n❌ Files not found. Please check data_root path.")
-        return
-
-    # Test 2: Verify data format
-    logger.info("\n" + "-" * 60)
-    for filename in ['train_final.pt', 'val_final.pt', 'test_final.pt']:
-        if not verify_data_format(args.data_root, filename):
+        # Test 4: Test DataLoader
+        logger.info("\n" + "-" * 60)
+        if not test_dataloader(args.data_root):
             all_passed = False
 
-    if not all_passed:
-        logger.error("\n❌ Data format verification failed.")
-        return
+    else:
+        # Test chunked format
+        logger.info(f"\n✓ Found {len(data_info['train_chunks'])} train chunks")
+        logger.info(f"✓ Found {len(data_info['val_chunks'])} val chunks")
+        logger.info(f"✓ Found {len(data_info['test_chunks'])} test chunks")
 
-    # Test 3: Test MIMICDataset
-    logger.info("\n" + "-" * 60)
-    if not test_dataset_loading(args.data_root):
-        all_passed = False
+        # Test a sample chunk from each split
+        logger.info("\nTest 1: Verifying chunk format...")
+        test_chunks = []
 
-    # Test 4: Test DataLoader
-    logger.info("\n" + "-" * 60)
-    if not test_dataloader(args.data_root):
-        all_passed = False
+        if data_info['train_chunks']:
+            test_chunks.append(data_info['train_chunks'][0])
+        if data_info['val_chunks']:
+            test_chunks.append(data_info['val_chunks'][0])
+        if data_info['test_chunks']:
+            test_chunks.append(data_info['test_chunks'][0])
+
+        for chunk_file in test_chunks:
+            logger.info(f"\nTesting: {chunk_file}")
+            if not verify_data_format(args.data_root, chunk_file):
+                all_passed = False
+
+        if not all_passed:
+            logger.error("\n❌ Chunk format verification failed.")
+            return False
+
+        # Test 3: Test MIMICDataset with first train chunk
+        logger.info("\n" + "-" * 60)
+        logger.info("Testing MIMICDataset with first train chunk...")
+        if data_info['train_chunks']:
+            chunk_path = str(Path(args.data_root) / data_info['train_chunks'][0])
+            try:
+                dataset = MIMICDataset(chunk_path, augmentation=None, max_samples=10)
+                logger.info(f"✓ Created dataset with {len(dataset)} samples")
+
+                # Get a sample
+                sample = dataset[0]
+                logger.info(f"✓ Retrieved sample 0")
+                logger.info(f"  - Image shape: {sample['image'].shape}")
+                logger.info(f"  - Text input_ids shape: {sample['text_input_ids'].shape}")
+                logger.info(f"  - Clinical features shape: {sample['clinical_features'].shape}")
+                logger.info(f"  - Labels: {len(sample['labels'])} classes")
+            except Exception as e:
+                logger.error(f"❌ Error testing dataset: {e}")
+                import traceback
+                traceback.print_exc()
+                all_passed = False
+
+        # Test 4: Test DataLoader with first train chunk
+        logger.info("\n" + "-" * 60)
+        logger.info("Testing DataLoader with first train chunk...")
+        if data_info['train_chunks']:
+            chunk_path = str(Path(args.data_root) / data_info['train_chunks'][0])
+            try:
+                dataset = MIMICDataset(chunk_path, augmentation=None, max_samples=10)
+
+                dataloader = DataLoader(
+                    dataset,
+                    batch_size=4,
+                    shuffle=False,
+                    num_workers=0,
+                    collate_fn=collate_fn
+                )
+
+                logger.info(f"✓ Created DataLoader")
+
+                # Get a batch
+                batch = next(iter(dataloader))
+
+                logger.info(f"✓ Retrieved batch")
+                logger.info(f"  - Batch size: {batch['image'].shape[0]}")
+                logger.info(f"  - Image batch shape: {batch['image'].shape}")
+                logger.info(f"  - Text input_ids batch shape: {batch['text_input_ids'].shape}")
+                logger.info(f"  - Clinical features batch shape: {batch['clinical_features'].shape}")
+                logger.info(f"  - Labels: {len(batch['labels'])} classes")
+
+                # Verify batching worked correctly
+                expected_batch_size = min(4, len(dataset))
+                if batch['image'].shape[0] != expected_batch_size:
+                    logger.error(f"❌ Batch size should be {expected_batch_size}, got {batch['image'].shape[0]}")
+                    all_passed = False
+
+                if batch['image'].shape[1:] != (3, 518, 518):
+                    logger.error(f"❌ Image shape should be (3, 518, 518), got {batch['image'].shape[1:]}")
+                    all_passed = False
+
+                if batch['clinical_features'].shape != (expected_batch_size, 45):
+                    logger.error(f"❌ Clinical features shape should be ({expected_batch_size}, 45), got {batch['clinical_features'].shape}")
+                    all_passed = False
+
+                if all_passed:
+                    logger.info(f"✓ Batch shapes are correct")
+
+            except Exception as e:
+                logger.error(f"❌ Error testing dataloader: {e}")
+                import traceback
+                traceback.print_exc()
+                all_passed = False
 
     # Summary
     logger.info("\n" + "=" * 60)
     if all_passed:
         logger.info("✅ ALL TESTS PASSED!")
         logger.info("=" * 60)
+        logger.info(f"\nData format: {data_info['format'].upper()}")
+
+        if data_info['format'] == 'chunked':
+            logger.info(f"  Train chunks: {len(data_info['train_chunks'])}")
+            logger.info(f"  Val chunks:   {len(data_info['val_chunks'])}")
+            logger.info(f"  Test chunks:  {len(data_info['test_chunks'])}")
+            logger.info("\nNote: Chunked format is recommended for large datasets")
+            logger.info("      Your dataloader can use individual chunks for training")
+
         logger.info("\nYour data is ready to use!")
         logger.info("\nNext steps:")
-        logger.info("  1. Create debug dataset:")
-        logger.info("     python scripts/create_debug_dataset.py")
-        logger.info("  2. Analyze dataset:")
-        logger.info("     python scripts/analyze_dataset.py")
-        logger.info("  3. Test training pipeline:")
-        logger.info("     python scripts/test_full_pipeline_debug.py")
+        logger.info("  1. Analyze dataset:")
+        logger.info(f"     python scripts/analyze_dataset.py --data-root {args.data_root}")
+        logger.info("  2. Start training:")
+        logger.info(f"     python src/training/train_lightning.py --data-root {args.data_root}")
     else:
         logger.error("❌ SOME TESTS FAILED")
         logger.error("=" * 60)

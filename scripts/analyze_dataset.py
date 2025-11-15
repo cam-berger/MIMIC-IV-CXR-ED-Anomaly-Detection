@@ -42,27 +42,61 @@ class DatasetAnalyzer:
     def __init__(self, data_root: str, class_names: List[str]):
         """
         Args:
-            data_root: Directory containing train/val/test_final.pt files
+            data_root: Directory containing train/val/test files (.pt or chunks)
             class_names: List of abnormality class names
         """
         self.data_root = Path(data_root)
         self.class_names = class_names
 
-        # Load data
-        self.train_data = self._load_split('train_final.pt')
-        self.val_data = self._load_split('val_final.pt')
-        self.test_data = self._load_split('test_final.pt')
+        # Load data (supports both combined and chunked formats)
+        self.train_data = self._load_split_auto('train')
+        self.val_data = self._load_split_auto('val')
+        self.test_data = self._load_split_auto('test')
 
         logger.info(f"Loaded {len(self.train_data)} train, {len(self.val_data)} val, "
                    f"{len(self.test_data)} test samples")
 
+    def _load_split_auto(self, split_name: str) -> List[Dict]:
+        """
+        Auto-detect and load data split (combined or chunked format)
+
+        Args:
+            split_name: 'train', 'val', or 'test'
+
+        Returns:
+            List of data samples
+        """
+        # Try combined format first
+        combined_path = self.data_root / f'{split_name}_final.pt'
+        if combined_path.exists():
+            logger.info(f"Loading {split_name} (combined format)...")
+            return torch.load(combined_path, map_location='cpu', weights_only=False)
+
+        # Try chunked format
+        chunk_pattern = f'{split_name}_chunk_*.pt'
+        chunk_files = sorted(self.data_root.glob(chunk_pattern))
+
+        if chunk_files:
+            logger.info(f"Loading {split_name} from {len(chunk_files)} chunks...")
+            all_data = []
+            for chunk_file in chunk_files:
+                chunk_data = torch.load(chunk_file, map_location='cpu', weights_only=False)
+                all_data.extend(chunk_data)
+            logger.info(f"  Loaded {len(all_data)} samples from chunks")
+            return all_data
+
+        # Not found
+        logger.warning(f"No data found for {split_name} split")
+        logger.warning(f"  Looked for: {split_name}_final.pt or {chunk_pattern}")
+        return []
+
     def _load_split(self, filename: str) -> List[Dict]:
-        """Load a data split"""
+        """Load a data split (legacy method for backward compatibility)"""
         path = self.data_root / filename
         if not path.exists():
             logger.warning(f"File not found: {path}")
             return []
-        return torch.load(path, map_location='cpu')
+        return torch.load(path, map_location='cpu', weights_only=False)
 
     def analyze_class_distribution(self) -> Dict:
         """Analyze class distribution across splits"""
@@ -592,7 +626,7 @@ def main():
 
     parser.add_argument('--data-root', type=str,
                        default='/media/dev/MIMIC_DATA/phase1_with_path_fixes_raw',
-                       help='Directory containing train/val/test_final.pt files')
+                       help='Directory containing train/val/test files (.pt or chunks)')
 
     parser.add_argument('--output-dir', type=str,
                        default='reports/dataset_analysis',

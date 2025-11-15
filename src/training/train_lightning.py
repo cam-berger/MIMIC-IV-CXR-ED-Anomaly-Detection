@@ -98,8 +98,19 @@ class EnhancedMDFNetLightning(pl.LightningModule):
             raise ValueError(f"Unknown loss function: {loss_config['name']}")
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Forward pass"""
-        return self.model(batch)
+        """
+        Forward pass
+
+        Returns:
+            probabilities: [B, num_classes] tensor (for loss computation)
+        """
+        outputs = self.model(batch)
+        # Model returns dict with 'probabilities', extract for loss function
+        if isinstance(outputs, dict):
+            return outputs['probabilities']
+        else:
+            # If model returns tensor directly, return as-is
+            return outputs
 
     def training_step(self, batch: Dict, batch_idx: int) -> Dict[str, torch.Tensor]:
         """

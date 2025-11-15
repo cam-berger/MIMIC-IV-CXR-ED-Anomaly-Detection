@@ -20,6 +20,9 @@ import numpy as np
 from torchvision import transforms
 import logging
 
+# Import Enhanced RAG adapter
+from src.training.enhanced_rag_adapter import EnhancedRAGAdapter
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -58,7 +61,7 @@ class MIMICDataset(Dataset):
             self.data = self._load_from_gcs(data_path)
         else:
             # Local path
-            self.data = torch.load(data_path, map_location='cpu')
+            self.data = torch.load(data_path, map_location='cpu', weights_only=False)
 
         logger.info(f"Loaded {len(self.data)} samples")
 
@@ -67,11 +70,59 @@ class MIMICDataset(Dataset):
             self.data = self.data[:max_samples]
             logger.info(f"Limited to {max_samples} samples for debugging")
 
+        # Auto-detect data format and initialize adapter if needed
+        self.data_format = self._detect_data_format()
+        self.adapter = None
+
+        if self.data_format == 'enhanced_rag':
+            logger.info("Enhanced RAG format detected - initializing adapter")
+            self.adapter = EnhancedRAGAdapter()
+        else:
+            logger.info("Standard format detected - no adapter needed")
+
         # Extract class names from first sample
         if len(self.data) > 0:
-            self.class_names = list(self.data[0]['labels'].keys())
+            # Get class names from converted sample if using adapter
+            if self.adapter:
+                converted = self.adapter.convert_sample(self.data[0])
+                self.class_names = list(converted['labels'].keys())
+            else:
+                self.class_names = list(self.data[0]['labels'].keys())
         else:
             self.class_names = []
+
+    def _detect_data_format(self) -> str:
+        """
+        Auto-detect whether data is in Enhanced RAG or Standard format
+
+        Returns:
+            'enhanced_rag' or 'standard'
+        """
+        if len(self.data) == 0:
+            logger.warning("Empty dataset, defaulting to standard format")
+            return 'standard'
+
+        sample = self.data[0]
+
+        # Check for Enhanced RAG format markers
+        has_image_tensor = 'image_tensor' in sample
+        has_clinical_data_str = 'clinical_data' in sample and isinstance(sample.get('clinical_data'), str)
+        has_nested_labels = 'labels' in sample and isinstance(sample.get('labels'), dict) and 'disease_labels' in sample.get('labels', {})
+        has_enhanced_note = 'enhanced_note' in sample
+        has_attention_segments = 'attention_segments' in sample
+
+        # Check for Standard format markers
+        has_image = 'image' in sample
+        has_clinical_features = 'clinical_features' in sample
+
+        if has_image_tensor and has_clinical_data_str and has_nested_labels:
+            return 'enhanced_rag'
+        elif has_image and has_clinical_features:
+            return 'standard'
+        else:
+            logger.warning(f"Ambiguous data format. Sample keys: {sample.keys()}")
+            logger.warning("Defaulting to standard format")
+            return 'standard'
 
     def _load_from_gcs(self, gcs_path: str) -> List[Dict]:
         """
@@ -99,7 +150,7 @@ class MIMICDataset(Dataset):
 
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp_file:
                 blob.download_to_filename(tmp_file.name)
-                data = torch.load(tmp_file.name, map_location='cpu')
+                data = torch.load(tmp_file.name, map_location='cpu', weights_only=False)
 
             # Clean up temp file
             os.unlink(tmp_file.name)
@@ -131,7 +182,13 @@ class MIMICDataset(Dataset):
                 - study_id: int
                 - dicom_id: str
         """
-        sample = self.data[idx]
+        raw_sample = self.data[idx]
+
+        # Convert Enhanced RAG format to Standard format if needed
+        if self.adapter:
+            sample = self.adapter.convert_sample(raw_sample)
+        else:
+            sample = raw_sample
 
         # Get image
         image = sample['image']  # [3, 518, 518]
@@ -178,7 +235,13 @@ class MIMICDataset(Dataset):
         # Count positive samples for each class
         class_counts = {name: 0 for name in self.class_names}
 
-        for sample in self.data:
+        for raw_sample in self.data:
+            # Convert if using adapter
+            if self.adapter:
+                sample = self.adapter.convert_sample(raw_sample)
+            else:
+                sample = raw_sample
+
             for class_name, label in sample['labels'].items():
                 if label == 1:
                     class_counts[class_name] += 1
@@ -213,7 +276,13 @@ class MIMICDataset(Dataset):
         # Compute per-sample weights
         sample_weights = []
 
-        for sample in self.data:
+        for raw_sample in self.data:
+            # Convert if using adapter
+            if self.adapter:
+                sample = self.adapter.convert_sample(raw_sample)
+            else:
+                sample = raw_sample
+
             # Sum weights of positive classes for this sample
             weight = 0.0
             for i, class_name in enumerate(self.class_names):
@@ -391,6 +460,41 @@ class MIMICDataModule(pl.LightningDataModule):
         self.val_dataset = None
         self.test_dataset = None
 
+    def _get_data_path(self, split_name: str, filename: str) -> str:
+        """
+        Get data path, supporting both single files and chunked format
+
+        Args:
+            split_name: 'train', 'val', or 'test'
+            filename: Configured filename (e.g., 'train_final.pt')
+
+        Returns:
+            Path to data file or first chunk file
+        """
+        # Try single file first
+        single_file_path = self.data_root / filename
+        if single_file_path.exists():
+            logger.info(f"Found single file for {split_name}: {filename}")
+            return str(single_file_path)
+
+        # Try chunked format
+        # Look for files like train_chunk_*.pt or val_chunk_*.pt
+        chunk_pattern = f"{split_name}_chunk_*.pt"
+        chunk_files = sorted(self.data_root.glob(chunk_pattern))
+
+        if chunk_files:
+            logger.info(f"Found {len(chunk_files)} chunks for {split_name}")
+            # For chunked format, we need to create a special wrapper
+            # For now, return first chunk and let MIMICDataset handle it
+            # TODO: Implement proper multi-chunk loading
+            return str(chunk_files[0])
+
+        raise FileNotFoundError(
+            f"No data found for {split_name}. Looked for:\n"
+            f"  - Single file: {single_file_path}\n"
+            f"  - Chunked files: {self.data_root}/{chunk_pattern}"
+        )
+
     def setup(self, stage: Optional[str] = None):
         """
         Setup datasets for training/validation/testing
@@ -400,16 +504,16 @@ class MIMICDataModule(pl.LightningDataModule):
         """
         if stage == 'fit' or stage is None:
             # Training dataset
-            train_path = self.data_root / self.train_file
+            train_path = self._get_data_path('train', self.train_file)
             self.train_dataset = MIMICDataset(
-                data_path=str(train_path),
+                data_path=train_path,
                 augmentation=self.train_transform
             )
 
             # Validation dataset
-            val_path = self.data_root / self.val_file
+            val_path = self._get_data_path('val', self.val_file)
             self.val_dataset = MIMICDataset(
-                data_path=str(val_path),
+                data_path=val_path,
                 augmentation=self.val_transform
             )
 
@@ -418,9 +522,9 @@ class MIMICDataModule(pl.LightningDataModule):
 
         if stage == 'test' or stage is None:
             # Test dataset
-            test_path = self.data_root / self.test_file
+            test_path = self._get_data_path('test', self.test_file)
             self.test_dataset = MIMICDataset(
-                data_path=str(test_path),
+                data_path=test_path,
                 augmentation=self.val_transform
             )
 
@@ -430,7 +534,10 @@ class MIMICDataModule(pl.LightningDataModule):
         """Create training DataLoader"""
 
         # Create sampler
-        if self.use_weighted_sampler and not isinstance(self.trainer, pl.Trainer) or self.trainer.world_size == 1:
+        # Check if we're in a distributed training context
+        is_distributed = hasattr(self, 'trainer') and self.trainer is not None and self.trainer.world_size > 1
+
+        if self.use_weighted_sampler and not is_distributed:
             # Weighted sampler for class imbalance (only for single GPU)
             sample_weights = self.train_dataset.compute_sample_weights()
             sampler = WeightedRandomSampler(
@@ -439,7 +546,7 @@ class MIMICDataModule(pl.LightningDataModule):
                 replacement=True
             )
             shuffle = False
-        elif hasattr(self, 'trainer') and self.trainer.world_size > 1:
+        elif is_distributed:
             # Distributed sampler for multi-GPU
             sampler = DistributedSampler(
                 self.train_dataset,
