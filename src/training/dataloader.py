@@ -20,6 +20,9 @@ import numpy as np
 from torchvision import transforms
 import logging
 
+# Import Enhanced RAG adapter
+from src.training.enhanced_rag_adapter import EnhancedRAGAdapter
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -67,11 +70,59 @@ class MIMICDataset(Dataset):
             self.data = self.data[:max_samples]
             logger.info(f"Limited to {max_samples} samples for debugging")
 
+        # Auto-detect data format and initialize adapter if needed
+        self.data_format = self._detect_data_format()
+        self.adapter = None
+
+        if self.data_format == 'enhanced_rag':
+            logger.info("Enhanced RAG format detected - initializing adapter")
+            self.adapter = EnhancedRAGAdapter()
+        else:
+            logger.info("Standard format detected - no adapter needed")
+
         # Extract class names from first sample
         if len(self.data) > 0:
-            self.class_names = list(self.data[0]['labels'].keys())
+            # Get class names from converted sample if using adapter
+            if self.adapter:
+                converted = self.adapter.convert_sample(self.data[0])
+                self.class_names = list(converted['labels'].keys())
+            else:
+                self.class_names = list(self.data[0]['labels'].keys())
         else:
             self.class_names = []
+
+    def _detect_data_format(self) -> str:
+        """
+        Auto-detect whether data is in Enhanced RAG or Standard format
+
+        Returns:
+            'enhanced_rag' or 'standard'
+        """
+        if len(self.data) == 0:
+            logger.warning("Empty dataset, defaulting to standard format")
+            return 'standard'
+
+        sample = self.data[0]
+
+        # Check for Enhanced RAG format markers
+        has_image_tensor = 'image_tensor' in sample
+        has_clinical_data_str = 'clinical_data' in sample and isinstance(sample.get('clinical_data'), str)
+        has_nested_labels = 'labels' in sample and isinstance(sample.get('labels'), dict) and 'disease_labels' in sample.get('labels', {})
+        has_enhanced_note = 'enhanced_note' in sample
+        has_attention_segments = 'attention_segments' in sample
+
+        # Check for Standard format markers
+        has_image = 'image' in sample
+        has_clinical_features = 'clinical_features' in sample
+
+        if has_image_tensor and has_clinical_data_str and has_nested_labels:
+            return 'enhanced_rag'
+        elif has_image and has_clinical_features:
+            return 'standard'
+        else:
+            logger.warning(f"Ambiguous data format. Sample keys: {sample.keys()}")
+            logger.warning("Defaulting to standard format")
+            return 'standard'
 
     def _load_from_gcs(self, gcs_path: str) -> List[Dict]:
         """
@@ -131,7 +182,13 @@ class MIMICDataset(Dataset):
                 - study_id: int
                 - dicom_id: str
         """
-        sample = self.data[idx]
+        raw_sample = self.data[idx]
+
+        # Convert Enhanced RAG format to Standard format if needed
+        if self.adapter:
+            sample = self.adapter.convert_sample(raw_sample)
+        else:
+            sample = raw_sample
 
         # Get image
         image = sample['image']  # [3, 518, 518]
@@ -178,7 +235,13 @@ class MIMICDataset(Dataset):
         # Count positive samples for each class
         class_counts = {name: 0 for name in self.class_names}
 
-        for sample in self.data:
+        for raw_sample in self.data:
+            # Convert if using adapter
+            if self.adapter:
+                sample = self.adapter.convert_sample(raw_sample)
+            else:
+                sample = raw_sample
+
             for class_name, label in sample['labels'].items():
                 if label == 1:
                     class_counts[class_name] += 1
@@ -213,7 +276,13 @@ class MIMICDataset(Dataset):
         # Compute per-sample weights
         sample_weights = []
 
-        for sample in self.data:
+        for raw_sample in self.data:
+            # Convert if using adapter
+            if self.adapter:
+                sample = self.adapter.convert_sample(raw_sample)
+            else:
+                sample = raw_sample
+
             # Sum weights of positive classes for this sample
             weight = 0.0
             for i, class_name in enumerate(self.class_names):
