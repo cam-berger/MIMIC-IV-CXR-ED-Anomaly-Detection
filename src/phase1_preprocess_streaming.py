@@ -101,7 +101,13 @@ class DataConfig:
     num_visual_tokens: int = 256  # For cross-attention
     num_text_tokens: int = 512
 
-    # Data splits (following MDF-Net)
+    # Data splits
+    # IMPORTANT: Set use_official_splits=True to use MIMIC-CXR's recommended patient-level splits
+    # This ensures reproducibility and proper patient-level splitting (no patient in multiple splits)
+    use_official_splits: bool = True  # Recommended for all experiments
+    official_split_file: str = "mimic-cxr-2.0.0-split.csv.gz"  # Located in mimic_cxr_path
+
+    # Custom split ratios (only used if use_official_splits=False)
     train_split: float = 0.7
     val_split: float = 0.15
     test_split: float = 0.15
@@ -745,23 +751,106 @@ class DatasetCreator:
     def __init__(self, config: DataConfig):
         self.config = config
         self.gcs_helper = GCSHelper(config)
-        
+
         # Initialize processors
         self.image_processor = ImageProcessor(config)
         self.text_processor = TextProcessor(config)
         self.knowledge_base = RAGKnowledgeBase(config)
-        
+
         # Initialize data joiner
         self.data_joiner = MIMICDataJoiner(config)
-        
+
         # Timing statistics
         self.timing_stats = {
             'load': 0,
-            'process': 0, 
+            'process': 0,
             'write': 0,
             'total': 0
         }
-    
+
+        # Load official MIMIC-CXR splits if configured
+        self.official_splits_map = None
+        if self.config.use_official_splits:
+            self.official_splits_map = self.load_official_splits()
+
+    def load_official_splits(self) -> Dict[Tuple[int, int], str]:
+        """
+        Load the official MIMIC-CXR train/validate/test splits.
+
+        These are patient-level splits ensuring all images from the same patient
+        are in the same split (prevents data leakage).
+
+        Returns:
+            Dictionary mapping (subject_id, study_id) -> split_name
+            where split_name is 'train', 'validate', or 'test'
+        """
+        logger.info("=" * 60)
+        logger.info("Loading official MIMIC-CXR splits")
+        logger.info("=" * 60)
+
+        try:
+            # Build path to split file
+            if self.config.use_gcs:
+                split_path = f"{self.config.mimic_cxr_path}/{self.config.official_split_file}"
+            else:
+                base_path = Path(self.config.mimic_cxr_path).expanduser()
+                split_path = base_path / self.config.official_split_file
+
+            logger.info(f"Loading split file from: {split_path}")
+
+            # Read split file (it's gzipped)
+            split_df = self.gcs_helper.read_csv(split_path)
+
+            logger.info(f"Loaded {len(split_df)} study assignments")
+
+            # Validate columns
+            required_cols = ['subject_id', 'study_id', 'split']
+            missing_cols = [col for col in required_cols if col not in split_df.columns]
+            if missing_cols:
+                raise ValueError(f"Split file missing required columns: {missing_cols}")
+
+            # Create mapping: (subject_id, study_id) -> split_name
+            splits_map = {}
+            for _, row in split_df.iterrows():
+                key = (int(row['subject_id']), int(row['study_id']))
+                split_name = row['split'].strip().lower()
+
+                # Normalize split names: 'validate' -> 'val' for consistency
+                if split_name == 'validate':
+                    split_name = 'val'
+
+                splits_map[key] = split_name
+
+            # Count splits
+            split_counts = defaultdict(int)
+            for split_name in splits_map.values():
+                split_counts[split_name] += 1
+
+            logger.info("Split distribution:")
+            for split_name in ['train', 'val', 'test']:
+                count = split_counts.get(split_name, 0)
+                pct = 100.0 * count / len(splits_map) if splits_map else 0
+                logger.info(f"  {split_name:6s}: {count:7,} studies ({pct:5.1f}%)")
+
+            logger.info("=" * 60)
+            logger.info("✓ Official splits loaded successfully")
+            logger.info("✓ Patient-level splitting ensures no data leakage")
+            logger.info("=" * 60)
+
+            return splits_map
+
+        except FileNotFoundError as e:
+            logger.error(f"Split file not found: {split_path}")
+            logger.error("Please ensure mimic-cxr-2.0.0-split.csv.gz exists in the MIMIC-CXR directory")
+            logger.error("Falling back to custom stratified splits (NOT RECOMMENDED)")
+            return None
+        except Exception as e:
+            logger.error(f"Error loading official splits: {e}")
+            logger.error("Falling back to custom stratified splits (NOT RECOMMENDED)")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def process_single_record(self, row: pd.Series) -> Dict[str, Any]:
         """Process a single data record"""
         try:
@@ -1007,46 +1096,131 @@ class DatasetCreator:
         logger.info(f"Total: {total_count} records, {len(strat_keys)} stratification keys")
         return total_count, strat_keys
     
-    def create_stratified_split_indices(self, strat_keys: List[Tuple], 
+    def create_official_split_map_streaming(self, batch_files, total_count: int) -> Dict[int, str]:
+        """
+        Create split map using official MIMIC-CXR splits by streaming through batch files.
+
+        Args:
+            batch_files: List of batch file paths
+            total_count: Total number of records
+
+        Returns:
+            Dictionary mapping global_record_index -> split_name ('train', 'val', or 'test')
+        """
+        logger.info("Mapping records to official splits in streaming mode...")
+
+        split_map = {}
+        current_idx = 0
+        matched_count = 0
+        unmatched_count = 0
+
+        # Process each batch file
+        for batch_file in tqdm(batch_files, desc="Mapping to official splits"):
+            try:
+                # Load batch
+                if self.config.use_gcs:
+                    records = self.gcs_helper.read_torch(batch_file.name)
+                else:
+                    records = self.gcs_helper.read_torch(str(batch_file))
+
+                # Map each record to its official split
+                for record in records:
+                    subject_id = record.get('subject_id')
+                    study_id = record.get('study_id')
+
+                    if subject_id is not None and study_id is not None:
+                        # Look up official split
+                        key = (int(subject_id), int(study_id))
+                        split_name = self.official_splits_map.get(key)
+
+                        if split_name:
+                            split_map[current_idx] = split_name
+                            matched_count += 1
+                        else:
+                            # Record not in official splits - skip it
+                            unmatched_count += 1
+                            logger.debug(f"Record {current_idx} (subject={subject_id}, study={study_id}) not in official splits")
+                    else:
+                        # Record missing IDs - skip it
+                        unmatched_count += 1
+                        logger.warning(f"Record {current_idx} missing subject_id or study_id")
+
+                    current_idx += 1
+
+            except Exception as e:
+                logger.error(f"Error processing batch {batch_file}: {e}")
+                # Skip this batch and continue
+                continue
+
+        # Report statistics
+        logger.info("=" * 60)
+        logger.info(f"Official split mapping complete:")
+        logger.info(f"  Total records processed: {current_idx:,}")
+        logger.info(f"  Matched to official splits: {matched_count:,} ({100.0*matched_count/current_idx:.1f}%)")
+        logger.info(f"  Unmatched (will be excluded): {unmatched_count:,} ({100.0*unmatched_count/current_idx:.1f}%)")
+
+        # Count by split
+        split_counts = defaultdict(int)
+        for split_name in split_map.values():
+            split_counts[split_name] += 1
+
+        logger.info("\nRecords per split:")
+        for split_name in ['train', 'val', 'test']:
+            count = split_counts.get(split_name, 0)
+            pct = 100.0 * count / matched_count if matched_count > 0 else 0
+            logger.info(f"  {split_name:6s}: {count:7,} records ({pct:5.1f}%)")
+        logger.info("=" * 60)
+
+        if unmatched_count > 0:
+            logger.warning(f"\nNote: {unmatched_count:,} records were not in the official split file")
+            logger.warning("These may be from studies not included in MIMIC-CXR-JPG v2.0.0")
+            logger.warning("They will be excluded from training/validation/testing")
+
+        return split_map
+
+    def create_stratified_split_indices(self, strat_keys: List[Tuple],
                                        total_count: int) -> Tuple[set, set, set]:
         """
         Create stratified train/val/test split indices.
-        
+
+        NOTE: This is a fallback method. Official MIMIC-CXR splits are STRONGLY RECOMMENDED.
+
         Args:
             strat_keys: List of stratification keys
             total_count: Total number of records
-            
+
         Returns:
             train_indices, val_indices, test_indices as sets
         """
-        logger.info("Creating stratified split indices...")
-        
+        logger.info("Creating custom stratified split indices...")
+        logger.warning("REMINDER: Official MIMIC-CXR splits are recommended for reproducibility")
+
         # Set random seed for reproducibility
         np.random.seed(42)
-        
+
         # Group indices by stratification key
         strat_groups = defaultdict(list)
         for idx, key in enumerate(strat_keys):
             strat_groups[key].append(idx)
-        
+
         # Shuffle each group independently
         for key in strat_groups:
             np.random.shuffle(strat_groups[key])
-        
+
         # Split each group according to train/val/test ratios
         train_indices = set()
         val_indices = set()
         test_indices = set()
-        
+
         for key, indices in strat_groups.items():
             n_group = len(indices)
             n_train = int(n_group * self.config.train_split)
             n_val = int(n_group * self.config.val_split)
-            
+
             train_indices.update(indices[:n_train])
             val_indices.update(indices[n_train:n_train + n_val])
             test_indices.update(indices[n_train + n_val:])
-        
+
         logger.info(f"Split sizes: train={len(train_indices)}, val={len(val_indices)}, test={len(test_indices)}")
         return train_indices, val_indices, test_indices
     
@@ -1090,26 +1264,50 @@ class DatasetCreator:
             return
         
         logger.info(f"Found {total_count:,} records across {len(batch_files)} batches")
-        
-        # Step 4: Create stratified split indices
-        logger.info("Phase 2: Creating stratified split assignments...")
-        train_indices, val_indices, test_indices = self.create_stratified_split_indices(
-            strat_keys, total_count
-        )
-        
-        # Convert to a single lookup dictionary for O(1) access
-        split_map = {}
-        for idx in train_indices:
-            split_map[idx] = 'train'
-        for idx in val_indices:
-            split_map[idx] = 'val' 
-        for idx in test_indices:
-            split_map[idx] = 'test'
-        
-        # Free memory from indices sets
-        del train_indices, val_indices, test_indices, strat_keys
-        gc.collect()
-        
+
+        # Step 4: Create split assignments using official splits or custom stratification
+        logger.info("Phase 2: Creating split assignments...")
+
+        if self.official_splits_map:
+            # Use official MIMIC-CXR patient-level splits (RECOMMENDED)
+            logger.info("Using official MIMIC-CXR patient-level splits")
+            logger.info("This ensures proper patient-level splitting (no data leakage)")
+
+            # We need to map records to splits using their subject_id and study_id
+            # First, we'll extract these IDs from batch files in a streaming manner
+            split_map = self.create_official_split_map_streaming(batch_files, total_count)
+
+            # Free memory
+            del strat_keys
+            gc.collect()
+
+        else:
+            # Fallback to custom stratified splits (NOT RECOMMENDED)
+            logger.warning("=" * 60)
+            logger.warning("WARNING: Using custom stratified splits")
+            logger.warning("Official MIMIC-CXR splits are STRONGLY RECOMMENDED for:")
+            logger.warning("  - Reproducibility with published papers")
+            logger.warning("  - Proper patient-level splitting (prevents data leakage)")
+            logger.warning("  - Fair benchmarking")
+            logger.warning("=" * 60)
+
+            train_indices, val_indices, test_indices = self.create_stratified_split_indices(
+                strat_keys, total_count
+            )
+
+            # Convert to a single lookup dictionary for O(1) access
+            split_map = {}
+            for idx in train_indices:
+                split_map[idx] = 'train'
+            for idx in val_indices:
+                split_map[idx] = 'val'
+            for idx in test_indices:
+                split_map[idx] = 'test'
+
+            # Free memory from indices sets
+            del train_indices, val_indices, test_indices, strat_keys
+            gc.collect()
+
         logger.info(f"Split assignments created: {len(split_map):,} records mapped")
         
         # Step 5: Initialize streaming writers
