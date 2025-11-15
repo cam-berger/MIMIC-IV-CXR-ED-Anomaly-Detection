@@ -1,0 +1,185 @@
+# Phase 3 Configuration with CXR-PRO Radiology Impressions
+# =========================================================
+# Training with 4 modalities: Vision + Clinical Text + Radiology Text + Clinical Features
+# Uses CXR-PRO prior-free radiology impressions
+
+# Model Configuration
+model:
+  name: "EnhancedMDFNetWithRadiology"  # 4-modal architecture
+  num_classes: 14
+  clinical_feature_dim: 45
+  freeze_encoders: true  # Stage 1: Freeze encoders, train fusion + head
+
+  # Fusion settings
+  fusion_dim: 768  # Common dimension for 4-way fusion
+  num_heads: 8     # Multi-head attention
+  dropout_fusion: 0.1
+  dropout_head1: 0.3
+  dropout_head2: 0.2
+
+  # Radiology encoder settings
+  radiology_encoder_name: "microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext"
+  radiology_max_length: 512
+
+# Loss Configuration
+loss:
+  name: "CombinedLoss"
+  bce_weight: 0.7
+  focal_weight: 0.3
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+# Optimizer Configuration
+optimizer:
+  name: "AdamW"
+  lr: 1.0e-4  # Base LR for Stage 1 (encoders frozen)
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
+
+  # For Stage 2 fine-tuning (unfreeze encoders), use discriminative LR
+  use_discriminative_lr: false  # Set to true for Stage 2
+  lr_encoders: 1.0e-5     # Lower for pre-trained encoders (Stage 2)
+  lr_fusion: 5.0e-5       # Medium for fusion layer (Stage 2)
+  lr_head: 1.0e-4         # Higher for classification head (Stage 2)
+
+# Learning Rate Scheduler
+scheduler:
+  name: "cosine"
+  warmup_epochs: 3
+  min_lr: 1.0e-7
+
+# Training Configuration
+training:
+  max_epochs: 30
+  batch_size: 6  # Smaller batch for 4 modalities (327M parameters)
+  gradient_accumulation_steps: 6  # Effective batch = 6 * 6 = 36 per GPU
+
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 10
+    monitor: "val_mean_auroc"
+    mode: "max"
+    min_delta: 0.001
+
+  # Gradient clipping
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: "norm"
+
+  # Mixed precision
+  precision: "16-mixed"  # FP16 for memory efficiency (critical for 4 modalities)
+
+  # Checkpointing
+  save_top_k: 5
+  save_last: true
+  monitor: "val_mean_auroc"
+  mode: "max"
+  save_interval_epochs: 2
+
+# Data Configuration
+data:
+  # Point to Phase 1 data with CXR-PRO radiology impressions
+  data_root: "/path/to/processed/phase1_with_radiology"
+
+  # File names (with radiology)
+  train_file: "train_data_with_radiology.pt"
+  val_file: "val_data_with_radiology.pt"
+  test_file: "test_data_with_radiology.pt"
+
+  # DataLoader settings
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+
+  # Data augmentation (for training only)
+  augmentation:
+    enabled: true
+    horizontal_flip_prob: 0.5
+    rotation_degrees: 10
+    color_jitter:
+      brightness: 0.2
+      contrast: 0.2
+
+  # Weighted sampling for class imbalance
+  use_weighted_sampler: false
+
+# Logging Configuration
+logging:
+  experiment_name: "phase3_cxr_pro_4modal"
+  log_dir: "logs"
+  tensorboard_dir: "tb_logs"
+  log_every_n_steps: 50
+
+  # What to log
+  log_lr: true
+  log_gradients: false
+  log_weights: false
+
+  # Log attention weights (4-way cross-modal attention)
+  log_attention: true
+  log_attention_frequency: 100  # Every 100 steps
+
+# Distributed Training
+distributed:
+  strategy: "ddp"
+  num_nodes: 1
+  devices: 1  # Start with single GPU, increase as needed
+  accelerator: "auto"
+
+# Compute Environment
+compute:
+  deterministic: false
+  benchmark: true
+  seed: 42
+
+# Class Names (CheXpert labels)
+class_names:
+  - "No Finding"
+  - "Enlarged Cardiomediastinum"
+  - "Cardiomegaly"
+  - "Lung Opacity"
+  - "Lung Lesion"
+  - "Edema"
+  - "Consolidation"
+  - "Pneumonia"
+  - "Atelectasis"
+  - "Pneumothorax"
+  - "Pleural Effusion"
+  - "Pleural Other"
+  - "Fracture"
+  - "Support Devices"
+
+# CXR-PRO Specific Settings
+cxr_pro:
+  # Validate radiology impressions before training
+  validate_priors_removed: true
+
+  # Handle missing radiology impressions
+  # Options: 'zero', 'mean_pooling', 'skip'
+  missing_impression_strategy: 'zero'
+
+  # Statistics tracking
+  track_radiology_coverage: true  # Log % of records with radiology reports
+
+  # Quality thresholds
+  min_impression_length: 10  # Minimum chars to consider valid
+  max_prior_reference_rate: 0.01  # Max 1% with prior references
+
+# Training Stages
+# ===============
+# Stage 1 (Current config): Train fusion + head, encoders frozen
+#   - freeze_encoders: true
+#   - lr: 1.0e-4
+#   - max_epochs: 30
+#
+# Stage 2 (Fine-tuning): Unfreeze all encoders
+#   - freeze_encoders: false
+#   - use_discriminative_lr: true
+#   - lr_encoders: 1.0e-5
+#   - max_epochs: 20
+#
+# To run Stage 2:
+#   1. Set checkpoint path from Stage 1
+#   2. Update freeze_encoders: false
+#   3. Update use_discriminative_lr: true
+#   4. Reduce max_epochs to 20

@@ -4,6 +4,15 @@ HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused w
 
 ## Recent Improvements (November 2025)
 
+**NEW: CXR-PRO Integration (4-Modal Architecture)**:
+- **Prior-Free Radiology Reports**: Integrated CXR-PRO dataset to remove hallucinated references to priors
+- **GILBERT Model**: Implemented BioBERT-based prior removal (HuggingFace: `rajpurkarlab/gilbert`)
+- **4-Modal Architecture**: Extended Enhanced MDF-Net with radiology impressions as 4th modality
+- **Quad-Modal Attention**: 4-way cross-modal fusion (Vision + Clinical Text + Radiology Text + Clinical Features)
+- **Quality Validation**: Comprehensive validation for prior-free reports (<0.05% prior references)
+- **327M Parameters**: Vision (87M) + Clinical Text (149M) + Radiology (109M) + Fusion/Head (4M)
+- **See**: [CXR-PRO Integration Guide](docs/CXR_PRO_INTEGRATION.md)
+
 **Phase 3: Enhanced RAG Training Pipeline**:
 - **Official MIMIC-CXR Splits**: Implemented patient-level splits from `mimic-cxr-2.0.0-split.csv.gz` (377,110 studies)
 - **Enhanced RAG Adapter**: Automatic conversion between Enhanced RAG and Standard data formats
@@ -22,6 +31,13 @@ HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused w
 - **Memory-Efficient Streaming**: Process 100K+ records on 7.5GB RAM without OOM crashes
 
 ### Technical Documentation
+
+**CXR-PRO Integration (NEW)**:
+- **[CXR-PRO Integration Guide](docs/CXR_PRO_INTEGRATION.md)**: Complete guide for prior-free radiology reports
+  - GILBERT model usage (BioBERT-based prior removal)
+  - Phase 1 adapter for integrating CXR-PRO impressions
+  - 4-modal Enhanced MDF-Net architecture
+  - Data quality validation and troubleshooting
 
 **Phase 3 Training Pipeline**:
 - **[Enhanced RAG Adapter](docs/ENHANCED_RAG_ADAPTER.md)**: Auto-detection and conversion between Enhanced RAG and Standard formats
