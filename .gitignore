@@ -82,4 +82,4 @@ htmlcov/
 *.tmp
 
 # Personal planning files
-# TRAINING_PLAN_*.md  # Temporarily commented to push file
+TRAINING_PLAN_*.md
