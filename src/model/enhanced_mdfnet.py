@@ -46,8 +46,9 @@ class VisionEncoder(nn.Module):
             )
             self.encoder = self.model.visual  # Get just the vision encoder
 
-            # Get output dimension from the model
-            self.output_dim = self.model.visual.output_dim  # 512 for BiomedCLIP
+            # Get output dimension from the model (try multiple attributes)
+            self.output_dim = self._get_output_dim(self.model)
+            logger.info(f"Loaded vision encoder with output dim: {self.output_dim}")
 
         except ImportError:
             raise ImportError(
@@ -64,7 +65,8 @@ class VisionEncoder(nn.Module):
                     'ViT-B-16', pretrained='openai'
                 )
                 self.encoder = self.model.visual
-                self.output_dim = self.model.visual.output_dim
+                self.output_dim = self._get_output_dim(self.model)
+                logger.info(f"Loaded fallback CLIP with output dim: {self.output_dim}")
             except:
                 raise RuntimeError(
                     "Failed to load both BiomedCLIP and standard CLIP. "
@@ -74,6 +76,50 @@ class VisionEncoder(nn.Module):
         if freeze:
             for param in self.encoder.parameters():
                 param.requires_grad = False
+
+    def _get_output_dim(self, model) -> int:
+        """
+        Get output dimension from open_clip model
+
+        Args:
+            model: open_clip model
+
+        Returns:
+            Output dimension (typically 512 or 768)
+        """
+        # Try multiple ways to get the dimension
+
+        # Method 1: Check if visual encoder has output_dim
+        if hasattr(model.visual, 'output_dim'):
+            return model.visual.output_dim
+
+        # Method 2: Check model's embed_dim (common in CLIP models)
+        if hasattr(model, 'embed_dim'):
+            return model.embed_dim
+
+        # Method 3: Check visual.embed_dim
+        if hasattr(model.visual, 'embed_dim'):
+            return model.visual.embed_dim
+
+        # Method 4: Check visual.num_features (timm models)
+        if hasattr(model.visual, 'num_features'):
+            return model.visual.num_features
+
+        # Method 5: Run a dummy forward pass to infer dimension
+        try:
+            with torch.no_grad():
+                dummy_input = torch.randn(1, 3, 224, 224)
+                dummy_output = model.visual(dummy_input)
+                if isinstance(dummy_output, torch.Tensor):
+                    output_dim = dummy_output.shape[-1]
+                    logger.info(f"Inferred output dimension from forward pass: {output_dim}")
+                    return output_dim
+        except Exception as e:
+            logger.warning(f"Failed to infer dimension from forward pass: {e}")
+
+        # Default fallback (typical CLIP dimension)
+        logger.warning("Could not determine output dimension, defaulting to 512")
+        return 512
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         """
