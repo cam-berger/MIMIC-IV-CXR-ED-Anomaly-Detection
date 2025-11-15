@@ -43,7 +43,7 @@ def verify_data_format(data_root: str, filename: str) -> bool:
 
     try:
         path = Path(data_root) / filename
-        data = torch.load(path, map_location='cpu')
+        data = torch.load(path, map_location='cpu', weights_only=False)
 
         if not isinstance(data, list):
             logger.error(f"❌ Data should be a list, got {type(data)}")

@@ -70,7 +70,7 @@ class DatasetAnalyzer:
         combined_path = self.data_root / f'{split_name}_final.pt'
         if combined_path.exists():
             logger.info(f"Loading {split_name} (combined format)...")
-            return torch.load(combined_path, map_location='cpu')
+            return torch.load(combined_path, map_location='cpu', weights_only=False)
 
         # Try chunked format
         chunk_pattern = f'{split_name}_chunk_*.pt'
@@ -80,7 +80,7 @@ class DatasetAnalyzer:
             logger.info(f"Loading {split_name} from {len(chunk_files)} chunks...")
             all_data = []
             for chunk_file in chunk_files:
-                chunk_data = torch.load(chunk_file, map_location='cpu')
+                chunk_data = torch.load(chunk_file, map_location='cpu', weights_only=False)
                 all_data.extend(chunk_data)
             logger.info(f"  Loaded {len(all_data)} samples from chunks")
             return all_data
@@ -96,7 +96,7 @@ class DatasetAnalyzer:
         if not path.exists():
             logger.warning(f"File not found: {path}")
             return []
-        return torch.load(path, map_location='cpu')
+        return torch.load(path, map_location='cpu', weights_only=False)
 
     def analyze_class_distribution(self) -> Dict:
         """Analyze class distribution across splits"""

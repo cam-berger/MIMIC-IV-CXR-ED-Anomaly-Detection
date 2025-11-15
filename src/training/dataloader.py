@@ -58,7 +58,7 @@ class MIMICDataset(Dataset):
             self.data = self._load_from_gcs(data_path)
         else:
             # Local path
-            self.data = torch.load(data_path, map_location='cpu')
+            self.data = torch.load(data_path, map_location='cpu', weights_only=False)
 
         logger.info(f"Loaded {len(self.data)} samples")
 
@@ -99,7 +99,7 @@ class MIMICDataset(Dataset):
 
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp_file:
                 blob.download_to_filename(tmp_file.name)
-                data = torch.load(tmp_file.name, map_location='cpu')
+                data = torch.load(tmp_file.name, map_location='cpu', weights_only=False)
 
             # Clean up temp file
             os.unlink(tmp_file.name)
