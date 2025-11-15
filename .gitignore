@@ -80,3 +80,6 @@ htmlcov/
 *.save
 *.swp
 *.tmp
+
+# Personal planning files
+TRAINING_PLAN_*.md
