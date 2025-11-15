@@ -27,7 +27,7 @@ setup(
     install_requires=requirements,
     entry_points={
         "console_scripts": [
-            "mimic-preprocess=src.aws_processor:main",
+            "mimic-preprocess=src.phase1_preprocess_streaming:main",
         ],
     },
 )
