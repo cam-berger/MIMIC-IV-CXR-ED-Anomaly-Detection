@@ -35,9 +35,9 @@ from sklearn.metrics import roc_auc_score
 
 # Import model and loss
 import sys
-sys.path.append(str(Path(__file__).parent.parent))
-from model.enhanced_mdfnet import EnhancedMDFNet
-from model.losses import CombinedLoss, WeightedBCELoss, FocalLoss
+sys.path.append(str(Path(__file__).parent.parent.parent))  # Add project root to path
+from src.model.enhanced_mdfnet import EnhancedMDFNet
+from src.model.losses import CombinedLoss, WeightedBCELoss, FocalLoss
 
 
 class EnhancedMDFNetLightning(pl.LightningModule):
@@ -75,6 +75,9 @@ class EnhancedMDFNetLightning(pl.LightningModule):
 
         # Track best validation AUROC
         self.best_val_auroc = 0.0
+
+        # For collecting validation outputs (PyTorch Lightning 2.0+)
+        self.validation_step_outputs = []
 
     def _create_loss_function(self):
         """Create loss function based on config"""
@@ -170,11 +173,15 @@ class EnhancedMDFNetLightning(pl.LightningModule):
         self.log('val_loss', loss_dict['loss'], on_step=False, on_epoch=True,
                 prog_bar=True, logger=True, sync_dist=True)
 
-        return {
+        # Store outputs for epoch-end processing
+        output_dict = {
             'predictions': outputs.detach(),
             'labels': labels.detach(),
             'loss': loss_dict['loss'].detach()
         }
+        self.validation_step_outputs.append(output_dict)
+
+        return output_dict
 
     def on_validation_epoch_end(self) -> None:
         """
@@ -182,21 +189,13 @@ class EnhancedMDFNetLightning(pl.LightningModule):
 
         Computes and logs AUROC for all classes
         """
-        # This method is called automatically by PyTorch Lightning
-        # All validation_step outputs are gathered in self.validation_step_outputs
-        # if we use the validation_step_outputs attribute
-        pass
+        # Skip if no outputs (can happen at sanity check)
+        if len(self.validation_step_outputs) == 0:
+            return
 
-    def validation_epoch_end(self, outputs: List[Dict]) -> None:
-        """
-        Aggregate validation outputs and compute metrics
-
-        Args:
-            outputs: List of validation_step outputs
-        """
         # Gather all predictions and labels
-        all_preds = torch.cat([x['predictions'] for x in outputs], dim=0)
-        all_labels = torch.cat([x['labels'] for x in outputs], dim=0)
+        all_preds = torch.cat([x['predictions'] for x in self.validation_step_outputs], dim=0)
+        all_labels = torch.cat([x['labels'] for x in self.validation_step_outputs], dim=0)
 
         # Move to CPU for sklearn
         all_preds_np = all_preds.cpu().numpy()
@@ -229,13 +228,16 @@ class EnhancedMDFNetLightning(pl.LightningModule):
         self.log('best_val_auroc', self.best_val_auroc, on_epoch=True,
                 prog_bar=True, logger=True, sync_dist=True)
 
+        # Clear outputs for next epoch
+        self.validation_step_outputs.clear()
+
     def test_step(self, batch: Dict, batch_idx: int) -> Dict[str, torch.Tensor]:
         """Test step - same as validation"""
         return self.validation_step(batch, batch_idx)
 
-    def test_epoch_end(self, outputs: List[Dict]) -> None:
+    def on_test_epoch_end(self) -> None:
         """Aggregate test outputs - same as validation"""
-        self.validation_epoch_end(outputs)
+        self.on_validation_epoch_end()
 
     def configure_optimizers(self):
         """
@@ -530,9 +532,8 @@ def main():
     # Create model
     model = EnhancedMDFNetLightning(config)
 
-    # Create data module (will be implemented in next task)
-    # For now, this is a placeholder
-    from training.dataloader import MIMICDataModule
+    # Create data module
+    from src.training.dataloader import MIMICDataModule
     data_module = MIMICDataModule(config)
 
     # Create callbacks
