@@ -155,6 +155,16 @@ def test_forward_pass(config: dict):
         model = model.to(device)
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
+        # Check for NaN/inf in input data
+        logger.info("Checking input data for NaN/inf...")
+        for key, val in batch.items():
+            if isinstance(val, torch.Tensor):
+                if torch.isnan(val).any():
+                    logger.warning(f"⚠️  {key} contains NaN values!")
+                if torch.isinf(val).any():
+                    logger.warning(f"⚠️  {key} contains inf values!")
+                logger.info(f"  {key}: shape={val.shape}, min={val.min().item():.4f}, max={val.max().item():.4f}")
+
         # Forward pass
         logger.info("Running forward pass...")
         model.eval()
@@ -169,10 +179,24 @@ def test_forward_pass(config: dict):
             probabilities = outputs
 
         logger.info(f"✓ Output shape: {probabilities.shape}")
-        logger.info(f"✓ Output range: [{probabilities.min().item():.4f}, {probabilities.max().item():.4f}]")
+
+        # Check for NaN before asserting
+        has_nan = torch.isnan(probabilities).any().item()
+        has_inf = torch.isinf(probabilities).any().item()
+
+        if has_nan:
+            logger.error(f"❌ Output contains NaN values! {torch.isnan(probabilities).sum().item()} NaN values found")
+            logger.error("This suggests a numerical issue in the forward pass")
+        if has_inf:
+            logger.error(f"❌ Output contains inf values!")
+
+        if not has_nan and not has_inf:
+            logger.info(f"✓ Output range: [{probabilities.min().item():.4f}, {probabilities.max().item():.4f}]")
 
         # Verify output shape
         assert probabilities.shape == (config['training']['batch_size'], 14), "Wrong output shape"
+        assert not has_nan, "Outputs contain NaN values - check model initialization and input data"
+        assert not has_inf, "Outputs contain inf values"
         assert torch.all((probabilities >= 0) & (probabilities <= 1)), "Outputs should be in [0, 1]"
 
         print("\n" + "=" * 70)
@@ -248,16 +272,22 @@ def test_training_step(config: dict):
         # Compute loss
         loss_dict = loss_fn(probabilities, labels_tensor)
 
-        logger.info(f"✓ Total loss: {loss_dict['loss'].item():.4f}")
+        # Extract loss values (handle both tensor and float)
+        def get_loss_value(loss):
+            return loss.item() if hasattr(loss, 'item') else float(loss)
+
+        logger.info(f"✓ Total loss: {get_loss_value(loss_dict['loss']):.4f}")
         if 'bce_loss' in loss_dict:
-            logger.info(f"✓ BCE loss: {loss_dict['bce_loss'].item():.4f}")
+            logger.info(f"✓ BCE loss: {get_loss_value(loss_dict['bce_loss']):.4f}")
         if 'focal_loss' in loss_dict:
-            logger.info(f"✓ Focal loss: {loss_dict['focal_loss'].item():.4f}")
+            logger.info(f"✓ Focal loss: {get_loss_value(loss_dict['focal_loss']):.4f}")
 
         # Verify loss is valid
-        assert not torch.isnan(loss_dict['loss']), "Loss is NaN"
-        assert not torch.isinf(loss_dict['loss']), "Loss is Inf"
-        assert loss_dict['loss'].item() > 0, "Loss should be positive"
+        loss_value = get_loss_value(loss_dict['loss'])
+        import math
+        assert not math.isnan(loss_value), "Loss is NaN"
+        assert not math.isinf(loss_value), "Loss is Inf"
+        assert loss_value > 0, "Loss should be positive"
 
         print("\n" + "=" * 70)
         print("✅ Test 4 PASSED: Training step works correctly")
