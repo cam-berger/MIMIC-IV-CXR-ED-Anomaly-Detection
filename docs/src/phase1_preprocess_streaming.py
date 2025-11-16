@@ -62,13 +62,6 @@ import re
 import faiss
 from sentence_transformers import SentenceTransformer
 
-# CheXpert label processing
-from fix_chexpert_labels import (
-    CheXpertLabelProcessor,
-    enhance_record_with_labels,
-    CHEXPERT_LABELS
-)
-
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -126,11 +119,6 @@ class DataConfig:
         'admittime', 'dischtime', 'los_hours', 'prev_admissions',
         'medications', 'lab_results', 'allergies', 'medical_history'
     ])
-
-    # CheXpert label settings
-    chexpert_labels_path: str = "mimic-cxr-2.0.0-chexpert.csv.gz"
-    label_format_type: str = "multi_label"  # Options: multi_label, multi_class, positive_only, full
-    handle_uncertain_as: str = "negative"  # How to handle uncertain (-1) labels: negative, positive, or keep
 
 
 class GCSHelper:
@@ -772,15 +760,6 @@ class DatasetCreator:
         # Initialize data joiner
         self.data_joiner = MIMICDataJoiner(config)
 
-        # Initialize CheXpert label processor
-        self.label_processor = CheXpertLabelProcessor(
-            gcs_helper=self.gcs_helper if config.use_gcs else None,
-            use_gcs=config.use_gcs
-        )
-
-        # Load CheXpert labels
-        self._load_chexpert_labels()
-
         # Timing statistics
         self.timing_stats = {
             'load': 0,
@@ -872,51 +851,6 @@ class DatasetCreator:
             traceback.print_exc()
             return None
 
-    def _load_chexpert_labels(self):
-        """
-        Load CheXpert labels from MIMIC-CXR-JPG dataset
-
-        This loads the disease labels (14 CheXpert findings) that will be attached
-        to each record during preprocessing.
-        """
-        logger.info("=" * 60)
-        logger.info("Loading CheXpert disease labels")
-        logger.info("=" * 60)
-
-        try:
-            # Build path to CheXpert labels file
-            if self.config.use_gcs:
-                # For GCS, labels are typically in the CXR bucket
-                chexpert_path = self.config.chexpert_labels_path
-                logger.info(f"Loading from GCS: {chexpert_path}")
-            else:
-                # For local filesystem
-                base_path = Path(self.config.mimic_cxr_path).expanduser()
-                chexpert_path = base_path / self.config.chexpert_labels_path
-
-            logger.info(f"CheXpert labels file: {chexpert_path}")
-
-            # Load labels using the processor
-            self.label_processor.load_chexpert_labels(str(chexpert_path))
-
-            logger.info(f"Label format: {self.config.label_format_type}")
-            logger.info(f"Uncertain labels handled as: {self.config.handle_uncertain_as}")
-            logger.info("=" * 60)
-            logger.info("✓ CheXpert labels loaded successfully")
-            logger.info("=" * 60)
-
-        except FileNotFoundError as e:
-            logger.error(f"CheXpert labels file not found: {chexpert_path}")
-            logger.error("Please ensure mimic-cxr-2.0.0-chexpert.csv.gz exists")
-            logger.error("Preprocessing will continue but labels will be empty!")
-            self.label_processor = None
-        except Exception as e:
-            logger.error(f"Error loading CheXpert labels: {e}")
-            import traceback
-            traceback.print_exc()
-            logger.error("Preprocessing will continue but labels will be empty!")
-            self.label_processor = None
-
     def process_single_record(self, row: pd.Series) -> Dict[str, Any]:
         """Process a single data record"""
         try:
@@ -969,52 +903,25 @@ class DatasetCreator:
                 'subject_id': row['subject_id'],
                 'study_id': row['study_id'],
                 'dicom_id': row['dicom_id'],
-
+                
                 # Image data
                 'image': image_tensor,
                 'attention_regions': attention_data,
-
+                
                 # Text data
                 'text_tokens': text_data,
                 'clinical_features': clinical_features,
-
+                
                 # Knowledge
                 'retrieved_knowledge': retrieved_knowledge,
-
+                
                 # Labels (for supervised training)
                 'labels': {
                     'view_position': row.get('ViewPosition', 'UNKNOWN'),
+                    # Add more labels as needed
                 }
             }
-
-            # CRITICAL: Attach CheXpert disease labels
-            if self.label_processor is not None:
-                try:
-                    # Get formatted labels for this study
-                    study_labels = self.label_processor.format_labels_for_training(
-                        int(row['study_id']),
-                        format_type=self.config.label_format_type
-                    )
-
-                    # Merge disease labels into record
-                    record['labels'].update(study_labels)
-
-                except Exception as e:
-                    # If label lookup fails, add empty structure
-                    logger.warning(f"Failed to load labels for study {row['study_id']}: {e}")
-                    record['labels'].update({
-                        'disease_labels': [],
-                        'disease_binary': [0] * len(CHEXPERT_LABELS),
-                        'label_array': np.zeros(len(CHEXPERT_LABELS), dtype=np.float32)
-                    })
-            else:
-                # No label processor available - add empty structure
-                record['labels'].update({
-                    'disease_labels': [],
-                    'disease_binary': [0] * len(CHEXPERT_LABELS),
-                    'label_array': np.zeros(len(CHEXPERT_LABELS), dtype=np.float32)
-                })
-
+            
             return record
             
         except Exception as e:
@@ -2166,31 +2073,7 @@ def main():
         default=0.15,
         help='Test split ratio (default: 0.15)'
     )
-
-    # CheXpert label arguments
-    parser.add_argument(
-        '--chexpert-labels-path',
-        type=str,
-        default='mimic-cxr-2.0.0-chexpert.csv.gz',
-        help='Path to CheXpert labels CSV file (default: mimic-cxr-2.0.0-chexpert.csv.gz)'
-    )
-
-    parser.add_argument(
-        '--label-format',
-        type=str,
-        default='multi_label',
-        choices=['multi_label', 'multi_class', 'positive_only', 'full'],
-        help='Format for disease labels (default: multi_label)'
-    )
-
-    parser.add_argument(
-        '--handle-uncertain',
-        type=str,
-        default='negative',
-        choices=['negative', 'positive', 'keep'],
-        help='How to handle uncertain (-1) labels (default: negative)'
-    )
-
+    
     args = parser.parse_args()
     
     # Create configuration
@@ -2228,12 +2111,7 @@ def main():
     config.train_split = args.train_split
     config.val_split = args.val_split
     config.test_split = args.test_split
-
-    # Update CheXpert label settings
-    config.chexpert_labels_path = args.chexpert_labels_path
-    config.label_format_type = args.label_format
-    config.handle_uncertain_as = args.handle_uncertain
-
+    
     logger.info("=" * 60)
     logger.info("MIMIC Enhanced MDF-Net Data Preprocessing Pipeline")
     logger.info("=" * 60)
