@@ -358,7 +358,7 @@ class CrossModalAttention(nn.Module):
 
 class ClassificationHead(nn.Module):
     """
-    Multi-Label Classification Head
+    Multi-Label Classification Head with stability improvements
     Maps fused features to abnormality predictions
     """
 
@@ -377,19 +377,34 @@ class ClassificationHead(nn.Module):
         self.classifier = nn.Sequential(
             # Layer 1
             nn.Linear(input_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
+            nn.LayerNorm(hidden_dim),  # Changed from BatchNorm1d for stability
             nn.ReLU(),
             nn.Dropout(dropout1),
 
             # Layer 2
             nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.BatchNorm1d(hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),  # Changed from BatchNorm1d for stability
             nn.ReLU(),
             nn.Dropout(dropout2),
 
             # Output layer
             nn.Linear(hidden_dim // 2, num_classes)
         )
+
+        # Initialize weights properly
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        """Initialize network weights for stability"""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # Xavier initialization prevents extreme values
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0.01)  # Small positive bias
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
 
     def forward(self, fused_features: torch.Tensor) -> torch.Tensor:
         """
@@ -399,7 +414,12 @@ class ClassificationHead(nn.Module):
         Returns:
             logits: [B, num_classes] - Raw logits (apply sigmoid for probabilities)
         """
-        return self.classifier(fused_features)
+        logits = self.classifier(fused_features)
+
+        # Clamp logits to prevent sigmoid overflow
+        logits = torch.clamp(logits, min=-10, max=10)
+
+        return logits
 
 
 class EnhancedMDFNet(nn.Module):
@@ -535,9 +555,12 @@ class EnhancedMDFNet(nn.Module):
         # Fuse modalities
         fused_features = self.fusion_layer(vision_features, text_features, clinical_features)
 
-        # Classify
+        # Classify (logits are already clamped in classification_head)
         logits = self.classification_head(fused_features)
-        probabilities = torch.sigmoid(logits)
+
+        # Safe sigmoid with additional clamping for extra stability
+        logits_clamped = torch.clamp(logits, min=-10, max=10)
+        probabilities = torch.sigmoid(logits_clamped)
 
         # Get attention weights for visualization
         attention_weights = self.fusion_layer.get_attention_weights()

@@ -206,6 +206,12 @@ class MIMICDataset(Dataset):
         # Get clinical features
         clinical_features = sample['clinical_features']
 
+        # Handle NaN values in clinical features
+        # NaN values can occur due to missing vitals/demographics data
+        # Replace with 0 (safe for normalized features)
+        if torch.isnan(clinical_features).any():
+            clinical_features = torch.nan_to_num(clinical_features, nan=0.0)
+
         # Get labels
         labels = sample['labels']
 
