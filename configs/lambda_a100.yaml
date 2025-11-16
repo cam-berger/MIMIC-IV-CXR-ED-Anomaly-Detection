@@ -45,8 +45,8 @@ training:
   early_stopping:
     enabled: true
     patience: 5
-    monitor: "val_mean_auroc"
-    mode: "max"
+    monitor: "val_loss"  # Use val_loss instead of val_mean_auroc to avoid NaN issues with small datasets
+    mode: "min"  # Minimize loss (was "max" for AUROC)
     min_delta: 0.001
 
   # Gradient clipping
