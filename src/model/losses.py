@@ -39,8 +39,8 @@ class WeightedBCELoss(nn.Module):
         Returns:
             loss: Scalar loss value
         """
-        # Ensure predictions are in [0, 1]
-        predictions = torch.clamp(predictions, min=1e-7, max=1 - 1e-7)
+        # More aggressive clamping for numerical stability
+        predictions = torch.clamp(predictions, min=1e-6, max=1 - 1e-6)
 
         if self.pos_weights is None:
             # Uniform weights
@@ -52,8 +52,8 @@ class WeightedBCELoss(nn.Module):
         # Binary cross-entropy with positive class weighting
         # BCE = -[w * y * log(p) + (1-y) * log(1-p)]
         loss = -(
-            pos_weights * targets * torch.log(predictions) +
-            (1 - targets) * torch.log(1 - predictions)
+            pos_weights * targets * torch.log(predictions + 1e-8) +  # Added epsilon
+            (1 - targets) * torch.log(1 - predictions + 1e-8)  # Added epsilon
         )
 
         return loss.mean()
@@ -93,11 +93,11 @@ class FocalLoss(nn.Module):
         Returns:
             loss: Scalar loss value
         """
-        # Ensure predictions are in [0, 1]
-        predictions = torch.clamp(predictions, min=1e-7, max=1 - 1e-7)
+        # More aggressive clamping for numerical stability
+        predictions = torch.clamp(predictions, min=1e-6, max=1 - 1e-6)
 
-        # Standard binary cross-entropy
-        bce = -(targets * torch.log(predictions) + (1 - targets) * torch.log(1 - predictions))
+        # Standard binary cross-entropy with epsilon for safety
+        bce = -(targets * torch.log(predictions + 1e-8) + (1 - targets) * torch.log(1 - predictions + 1e-8))
 
         # Compute p_t: probability of correct class
         # p_t = p if y=1, else 1-p
