@@ -21,7 +21,7 @@ from torchvision import transforms
 import logging
 
 # Import Enhanced RAG adapter
-from src.training.enhanced_rag_adapter import EnhancedRAGAdapter
+from .enhanced_rag_adapter import EnhancedRAGAdapter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
