@@ -167,7 +167,9 @@ def test_forward_pass(config: dict):
 
         # Forward pass
         logger.info("Running forward pass...")
-        model.eval()
+        # Use train() mode for untrained model to avoid BatchNorm issues
+        # BatchNorm in eval() mode with uninitialized running stats can cause NaN
+        model.train()
         with torch.no_grad():
             outputs = model(batch)
 
