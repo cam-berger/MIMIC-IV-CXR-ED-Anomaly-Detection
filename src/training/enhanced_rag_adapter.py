@@ -221,6 +221,8 @@ class EnhancedRAGAdapter:
             return 0.0
         try:
             temp = float(value)
+            if np.isnan(temp):
+                return 0.0
             # Normal range: 97-99°F, map to ~0.5, extremes to 0-1
             return np.clip((temp - 95) / 10, 0, 1)
         except:
@@ -232,6 +234,8 @@ class EnhancedRAGAdapter:
             return 0.0
         try:
             hr = float(value)
+            if np.isnan(hr):
+                return 0.0
             # Normal: 60-100 bpm, map to ~0.5
             return np.clip(hr / 200, 0, 1)
         except:
@@ -243,6 +247,8 @@ class EnhancedRAGAdapter:
             return 0.0
         try:
             rr = float(value)
+            if np.isnan(rr):
+                return 0.0
             # Normal: 12-20 breaths/min
             return np.clip(rr / 40, 0, 1)
         except:
@@ -254,6 +260,8 @@ class EnhancedRAGAdapter:
             return 0.0
         try:
             o2 = float(value)
+            if np.isnan(o2):
+                return 0.0
             # Already in percentage, normalize to [0, 1]
             return np.clip(o2 / 100, 0, 1)
         except:
@@ -265,6 +273,8 @@ class EnhancedRAGAdapter:
             return 0.0
         try:
             bp = float(value)
+            if np.isnan(bp):
+                return 0.0
             # Normal range: 80-120 for sbp, 60-80 for dbp
             return np.clip(bp / 200, 0, 1)
         except:
@@ -276,6 +286,9 @@ class EnhancedRAGAdapter:
             return 0.0
         try:
             pain = float(str(value))
+            # Check for NaN (from JSON with nan values)
+            if np.isnan(pain):
+                return 0.0
             return np.clip(pain / 10, 0, 1)
         except:
             return 0.0
@@ -286,6 +299,8 @@ class EnhancedRAGAdapter:
             return 0.0
         try:
             acuity = float(value)
+            if np.isnan(acuity):
+                return 0.0
             # 1 = most critical, 5 = least critical
             return np.clip((6 - acuity) / 5, 0, 1)
         except:
@@ -297,6 +312,8 @@ class EnhancedRAGAdapter:
             return 0.5  # Unknown age -> middle value
         try:
             age = float(value)
+            if np.isnan(age):
+                return 0.5
             # Max age ~100
             return np.clip(age / 100, 0, 1)
         except:
