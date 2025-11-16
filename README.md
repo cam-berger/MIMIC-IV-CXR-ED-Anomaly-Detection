@@ -41,15 +41,15 @@ HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused w
 
 **Phase 3 Training Pipeline**:
 - **[Enhanced RAG Adapter](docs/ENHANCED_RAG_ADAPTER.md)**: Auto-detection and conversion between Enhanced RAG and Standard formats
-- **[Bug Fixes Summary](BUG_FIXES_SUMMARY.md)**: All 4 critical bugs fixed (DataLoader, BiomedCLIP, ModernBERT, output dimensions)
-- **[Troubleshooting Guide](TROUBLESHOOTING.md)**: Comprehensive troubleshooting for training pipeline
-- **[Codebase Audit](CODEBASE_AUDIT.md)**: Complete audit report - production ready
+- **[Bug Fixes Summary](docs/BUG_FIXES_SUMMARY.md)**: All 4 critical bugs fixed (DataLoader, BiomedCLIP, ModernBERT, output dimensions)
+- **[Troubleshooting Guide](docs/TROUBLESHOOTING.md)**: Comprehensive troubleshooting for training pipeline
+- **[Codebase Audit](docs/CODEBASE_AUDIT.md)**: Complete audit report - production ready
 - **[Official Splits Documentation](docs/OFFICIAL_SPLITS_FIX.md)**: Patient-level splits implementation
 
 **Training & Evaluation**:
 - **[Training Guide](docs/TRAINING_GUIDE.md)**: Fine-tuning Enhanced MDF-Net with multi-GPU support
 - **[Evaluation Guide](docs/EVALUATION_GUIDE.md)**: Metrics, confusion matrices, and correlation analysis
-- **[Phase 3 Integration Summary](ENHANCED_RAG_INTEGRATION_SUMMARY.md)**: Complete integration guide
+- **[Phase 3 Integration Summary](docs/ENHANCED_RAG_INTEGRATION_SUMMARY.md)**: Complete integration guide
 
 **Data Processing**:
 - **[OOM Solution Guide](docs/OOM_SOLUTION.md)**: Memory management and optimization
