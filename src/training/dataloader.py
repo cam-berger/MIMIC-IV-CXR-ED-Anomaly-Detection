@@ -206,6 +206,12 @@ class MIMICDataset(Dataset):
         # Get clinical features
         clinical_features = sample['clinical_features']
 
+        # Handle NaN values in clinical features
+        # NaN values can occur due to missing vitals/demographics data
+        # Replace with 0 (safe for normalized features)
+        if torch.isnan(clinical_features).any():
+            clinical_features = torch.nan_to_num(clinical_features, nan=0.0)
+
         # Get labels
         labels = sample['labels']
 
@@ -417,6 +423,122 @@ def create_augmentation_transform(config: Dict) -> transforms.Compose:
     return transforms.Compose(transform_list)
 
 
+class ChunkedDataset(Dataset):
+    """
+    Dataset wrapper that loads data from multiple chunk files
+
+    Combines multiple .pt files into a single dataset by concatenating them.
+    """
+
+    def __init__(self, chunk_paths: List[str], augmentation: Optional[transforms.Compose] = None):
+        """
+        Args:
+            chunk_paths: List of paths to chunk files
+            augmentation: Optional transforms for image augmentation
+        """
+        super().__init__()
+
+        self.chunk_paths = chunk_paths
+        self.augmentation = augmentation
+
+        # Load all chunks and concatenate
+        logger.info(f"Loading {len(chunk_paths)} chunks...")
+        all_data = []
+        for chunk_path in chunk_paths:
+            chunk_data = torch.load(chunk_path, map_location='cpu', weights_only=False)
+            all_data.extend(chunk_data)
+            logger.info(f"  Loaded {len(chunk_data)} samples from {Path(chunk_path).name}")
+
+        logger.info(f"Total samples: {len(all_data)}")
+
+        # Create a single MIMICDataset with concatenated data
+        # We'll use a temporary file approach or directly set the data
+        self.data = all_data
+
+        # Auto-detect data format
+        self.data_format = self._detect_data_format()
+        self.adapter = None
+
+        if self.data_format == 'enhanced_rag':
+            logger.info("Enhanced RAG format detected - initializing adapter")
+            self.adapter = EnhancedRAGAdapter()
+        else:
+            logger.info("Standard format detected - no adapter needed")
+
+        # Extract class names
+        if len(self.data) > 0:
+            if self.adapter:
+                converted = self.adapter.convert_sample(self.data[0])
+                self.class_names = list(converted['labels'].keys())
+            else:
+                self.class_names = list(self.data[0]['labels'].keys())
+        else:
+            self.class_names = []
+
+    def _detect_data_format(self) -> str:
+        """Auto-detect data format"""
+        if len(self.data) == 0:
+            return 'standard'
+
+        sample = self.data[0]
+        has_image_tensor = 'image_tensor' in sample
+        has_clinical_data_str = 'clinical_data' in sample and isinstance(sample.get('clinical_data'), str)
+        has_nested_labels = 'labels' in sample and isinstance(sample.get('labels'), dict) and 'disease_labels' in sample.get('labels', {})
+
+        if has_image_tensor and has_clinical_data_str and has_nested_labels:
+            return 'enhanced_rag'
+        return 'standard'
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        raw_sample = self.data[idx]
+
+        # Convert format if needed
+        if self.adapter:
+            sample = self.adapter.convert_sample(raw_sample)
+        else:
+            sample = raw_sample
+
+        # Get image
+        image = sample['image']
+
+        # Apply augmentation to image if specified
+        if self.augmentation is not None:
+            image = self.augmentation(image)
+
+        # Get text sequences
+        text_input_ids = sample['text_input_ids']
+        text_attention_mask = sample['text_attention_mask']
+
+        # Get clinical features
+        clinical_features = sample['clinical_features']
+
+        # Handle NaN values in clinical features
+        if torch.isnan(clinical_features).any():
+            clinical_features = torch.nan_to_num(clinical_features, nan=0.0)
+
+        # Get labels
+        labels = sample['labels']
+
+        # Metadata (with defaults for missing fields)
+        subject_id = sample.get('subject_id', -1)
+        study_id = sample.get('study_id', -1)
+        dicom_id = sample.get('dicom_id', 'unknown')
+
+        return {
+            'image': image,
+            'text_input_ids': text_input_ids,
+            'text_attention_mask': text_attention_mask,
+            'clinical_features': clinical_features,
+            'labels': labels,
+            'subject_id': subject_id,
+            'study_id': study_id,
+            'dicom_id': dicom_id
+        }
+
+
 class MIMICDataModule(pl.LightningDataModule):
     """
     PyTorch Lightning DataModule for MIMIC-IV-CXR-ED
@@ -460,22 +582,22 @@ class MIMICDataModule(pl.LightningDataModule):
         self.val_dataset = None
         self.test_dataset = None
 
-    def _get_data_path(self, split_name: str, filename: str) -> str:
+    def _get_data_paths(self, split_name: str, filename: str) -> List[str]:
         """
-        Get data path, supporting both single files and chunked format
+        Get data path(s), supporting both single files and chunked format
 
         Args:
             split_name: 'train', 'val', or 'test'
             filename: Configured filename (e.g., 'train_final.pt')
 
         Returns:
-            Path to data file or first chunk file
+            List of paths to data files (single file or all chunks)
         """
         # Try single file first
         single_file_path = self.data_root / filename
         if single_file_path.exists():
             logger.info(f"Found single file for {split_name}: {filename}")
-            return str(single_file_path)
+            return [str(single_file_path)]
 
         # Try chunked format
         # Look for files like train_chunk_*.pt or val_chunk_*.pt
@@ -484,10 +606,7 @@ class MIMICDataModule(pl.LightningDataModule):
 
         if chunk_files:
             logger.info(f"Found {len(chunk_files)} chunks for {split_name}")
-            # For chunked format, we need to create a special wrapper
-            # For now, return first chunk and let MIMICDataset handle it
-            # TODO: Implement proper multi-chunk loading
-            return str(chunk_files[0])
+            return [str(f) for f in chunk_files]
 
         raise FileNotFoundError(
             f"No data found for {split_name}. Looked for:\n"
@@ -504,29 +623,53 @@ class MIMICDataModule(pl.LightningDataModule):
         """
         if stage == 'fit' or stage is None:
             # Training dataset
-            train_path = self._get_data_path('train', self.train_file)
-            self.train_dataset = MIMICDataset(
-                data_path=train_path,
-                augmentation=self.train_transform
-            )
+            train_paths = self._get_data_paths('train', self.train_file)
+            if len(train_paths) > 1:
+                # Multiple chunks - use ChunkedDataset
+                self.train_dataset = ChunkedDataset(
+                    chunk_paths=train_paths,
+                    augmentation=self.train_transform
+                )
+            else:
+                # Single file - use MIMICDataset
+                self.train_dataset = MIMICDataset(
+                    data_path=train_paths[0],
+                    augmentation=self.train_transform
+                )
 
             # Validation dataset
-            val_path = self._get_data_path('val', self.val_file)
-            self.val_dataset = MIMICDataset(
-                data_path=val_path,
-                augmentation=self.val_transform
-            )
+            val_paths = self._get_data_paths('val', self.val_file)
+            if len(val_paths) > 1:
+                # Multiple chunks - use ChunkedDataset
+                self.val_dataset = ChunkedDataset(
+                    chunk_paths=val_paths,
+                    augmentation=self.val_transform
+                )
+            else:
+                # Single file - use MIMICDataset
+                self.val_dataset = MIMICDataset(
+                    data_path=val_paths[0],
+                    augmentation=self.val_transform
+                )
 
             logger.info(f"Training samples: {len(self.train_dataset)}")
             logger.info(f"Validation samples: {len(self.val_dataset)}")
 
         if stage == 'test' or stage is None:
             # Test dataset
-            test_path = self._get_data_path('test', self.test_file)
-            self.test_dataset = MIMICDataset(
-                data_path=test_path,
-                augmentation=self.val_transform
-            )
+            test_paths = self._get_data_paths('test', self.test_file)
+            if len(test_paths) > 1:
+                # Multiple chunks - use ChunkedDataset
+                self.test_dataset = ChunkedDataset(
+                    chunk_paths=test_paths,
+                    augmentation=self.val_transform
+                )
+            else:
+                # Single file - use MIMICDataset
+                self.test_dataset = MIMICDataset(
+                    data_path=test_paths[0],
+                    augmentation=self.val_transform
+                )
 
             logger.info(f"Test samples: {len(self.test_dataset)}")
 
