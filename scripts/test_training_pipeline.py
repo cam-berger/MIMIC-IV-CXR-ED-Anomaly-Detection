@@ -261,6 +261,16 @@ def test_training_step(config: dict):
         else:
             probabilities = outputs
 
+        # Check probabilities for NaN
+        has_nan = torch.isnan(probabilities).any().item()
+        has_inf = torch.isinf(probabilities).any().item()
+        if has_nan:
+            logger.error(f"❌ Probabilities contain NaN! {torch.isnan(probabilities).sum().item()} NaN values")
+        if has_inf:
+            logger.error(f"❌ Probabilities contain inf!")
+        if not has_nan and not has_inf:
+            logger.info(f"✓ Probabilities range: [{probabilities.min().item():.4f}, {probabilities.max().item():.4f}]")
+
         # Extract labels
         class_names = config['class_names']
         labels_dict = batch['labels']
@@ -271,7 +281,15 @@ def test_training_step(config: dict):
             if class_name in labels_dict:
                 labels_tensor[:, i] = labels_dict[class_name].float()
 
+        # Check labels for NaN
+        if torch.isnan(labels_tensor).any():
+            logger.error(f"❌ Labels contain NaN!")
+        else:
+            logger.info(f"✓ Labels range: [{labels_tensor.min().item():.4f}, {labels_tensor.max().item():.4f}]")
+            logger.info(f"✓ Positive labels: {(labels_tensor == 1).sum().item()}/{labels_tensor.numel()}")
+
         # Compute loss
+        logger.info("Computing loss...")
         loss_dict = loss_fn(probabilities, labels_tensor)
 
         # Extract loss values (handle both tensor and float)
