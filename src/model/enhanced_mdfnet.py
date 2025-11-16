@@ -105,20 +105,11 @@ class VisionEncoder(nn.Module):
         if hasattr(model.visual, 'num_features'):
             return model.visual.num_features
 
-        # Method 5: Run a dummy forward pass to infer dimension
-        try:
-            with torch.no_grad():
-                dummy_input = torch.randn(1, 3, 224, 224)
-                dummy_output = model.visual(dummy_input)
-                if isinstance(dummy_output, torch.Tensor):
-                    output_dim = dummy_output.shape[-1]
-                    logger.info(f"Inferred output dimension from forward pass: {output_dim}")
-                    return output_dim
-        except Exception as e:
-            logger.warning(f"Failed to infer dimension from forward pass: {e}")
-
-        # Default fallback (typical CLIP dimension)
-        logger.warning("Could not determine output dimension, defaulting to 512")
+        # Method 5: For BiomedCLIP and standard CLIP models, use known dimensions
+        # BiomedCLIP (ViT-B/16) uses 512-dim embeddings
+        # This avoids running a dummy forward pass during __init__ which can
+        # corrupt model state and cause NaN issues later
+        logger.info("Using default CLIP dimension: 512")
         return 512
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
