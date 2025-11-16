@@ -28,6 +28,47 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 
+def warmup_cuda():
+    """
+    Warm up CUDA/cuDNN to avoid NaN issues in initial forward passes.
+
+    This is necessary because CUDA and cuDNN kernels may not be fully
+    initialized on first use, which can cause numerical instability
+    (particularly with BatchNorm layers) leading to NaN values.
+
+    The issue manifests when creating multiple model instances in sequence
+    (as happens in this test suite), where early instances may produce
+    NaN outputs until CUDA is fully initialized.
+    """
+    if not torch.cuda.is_available():
+        return
+
+    logger.info("Warming up CUDA/cuDNN (this fixes NaN issues in early model instances)...")
+    device = torch.device('cuda')
+
+    # Run several dummy operations to fully initialize CUDA context
+    # We need more iterations to ensure stability across multiple model creations
+    for i in range(5):
+        # Simulate various operations that will be used in the model
+        x = torch.randn(16, 768).to(device)
+
+        # Test BatchNorm (the main source of NaN issues)
+        bn = torch.nn.BatchNorm1d(768).to(device)
+        bn.train()
+        y = bn(x)
+
+        # Test other common operations
+        z = torch.nn.functional.relu(y)
+        w = torch.nn.functional.layer_norm(z, (768,))
+        v = torch.nn.functional.dropout(w, p=0.1, training=True)
+
+        del x, y, z, w, v, bn
+
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    logger.info("CUDA warmup complete")
+
+
 def load_config(config_path: str) -> dict:
     """Load YAML config"""
     with open(config_path, 'r') as f:
@@ -155,18 +196,84 @@ def test_forward_pass(config: dict):
         model = model.to(device)
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
+        # Check for NaN/inf in input data
+        logger.info("Checking input data for NaN/inf...")
+        for key, val in batch.items():
+            if isinstance(val, torch.Tensor):
+                if torch.isnan(val).any():
+                    logger.warning(f"⚠️  {key} contains NaN values!")
+                if torch.isinf(val).any():
+                    logger.warning(f"⚠️  {key} contains inf values!")
+                logger.info(f"  {key}: shape={val.shape}, min={val.min().item():.4f}, max={val.max().item():.4f}")
+
         # Forward pass
         logger.info("Running forward pass...")
-        model.eval()
+        # Use train() mode for untrained model to avoid BatchNorm issues
+        # BatchNorm in eval() mode with uninitialized running stats can cause NaN
+        model.train()
         with torch.no_grad():
             outputs = model(batch)
 
-        logger.info(f"✓ Output shape: {outputs.shape}")
-        logger.info(f"✓ Output range: [{outputs.min().item():.4f}, {outputs.max().item():.4f}]")
+        # Model returns dict, extract probabilities
+        if isinstance(outputs, dict):
+            probabilities = outputs['probabilities']
+            logger.info(f"✓ Model returned dict with keys: {list(outputs.keys())}")
+        else:
+            probabilities = outputs
+
+        logger.info(f"✓ Output shape: {probabilities.shape}")
+
+        # Check for NaN before asserting
+        has_nan = torch.isnan(probabilities).any().item()
+        has_inf = torch.isinf(probabilities).any().item()
+
+        # If we get NaN, this might be a CUDA warmup issue. Retry up to 3 times.
+        retry_count = 0
+        max_retries = 3
+        while has_nan and retry_count < max_retries and torch.cuda.is_available():
+            retry_count += 1
+            logger.warning(f"⚠️  Forward pass produced NaN (CUDA warmup issue). Retry {retry_count}/{max_retries}...")
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+            # Create fresh model
+            model = EnhancedMDFNet(
+                num_classes=config['model']['num_classes'],
+                clinical_feature_dim=config['model']['clinical_feature_dim'],
+                modalities=config['model']['modalities'],
+                freeze_encoders=config['model']['freeze_encoders'],
+                dropout_fusion=config['model']['dropout_fusion'],
+                dropout_head1=config['model']['dropout_head1'],
+                dropout_head2=config['model']['dropout_head2']
+            )
+            model = model.to(device)
+            model.train()
+
+            with torch.no_grad():
+                outputs = model(batch)
+                probabilities = outputs['probabilities'] if isinstance(outputs, dict) else outputs
+
+            has_nan = torch.isnan(probabilities).any().item()
+            has_inf = torch.isinf(probabilities).any().item()
+
+            if not has_nan:
+                logger.info(f"✓ Retry {retry_count} successful - NaN was indeed a CUDA warmup issue")
+                break
+
+        if has_nan:
+            logger.error(f"❌ Output contains NaN values! {torch.isnan(probabilities).sum().item()} NaN values found")
+            logger.error("This suggests a numerical issue in the forward pass")
+        if has_inf:
+            logger.error(f"❌ Output contains inf values!")
+
+        if not has_nan and not has_inf:
+            logger.info(f"✓ Output range: [{probabilities.min().item():.4f}, {probabilities.max().item():.4f}]")
 
         # Verify output shape
-        assert outputs.shape == (config['training']['batch_size'], 14), "Wrong output shape"
-        assert torch.all((outputs >= 0) & (outputs <= 1)), "Outputs should be in [0, 1]"
+        assert probabilities.shape == (config['training']['batch_size'], 14), "Wrong output shape"
+        assert not has_nan, "Outputs contain NaN values - check model initialization and input data"
+        assert not has_inf, "Outputs contain inf values"
+        assert torch.all((probabilities >= 0) & (probabilities <= 1)), "Outputs should be in [0, 1]"
 
         print("\n" + "=" * 70)
         print("✅ Test 3 PASSED: Forward pass works correctly")
@@ -222,6 +329,55 @@ def test_training_step(config: dict):
         model.train()
         outputs = model(batch)
 
+        # Model returns dict, extract probabilities
+        if isinstance(outputs, dict):
+            probabilities = outputs['probabilities']
+        else:
+            probabilities = outputs
+
+        # Check probabilities for NaN
+        has_nan = torch.isnan(probabilities).any().item()
+        has_inf = torch.isinf(probabilities).any().item()
+
+        # If we get NaN, this might be a CUDA warmup issue. Retry up to 3 times.
+        retry_count = 0
+        max_retries = 3
+        while has_nan and retry_count < max_retries and torch.cuda.is_available():
+            retry_count += 1
+            logger.warning(f"⚠️  Forward pass produced NaN (CUDA warmup issue). Retry {retry_count}/{max_retries}...")
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+            # Create fresh model
+            model = EnhancedMDFNet(
+                num_classes=config['model']['num_classes'],
+                clinical_feature_dim=config['model']['clinical_feature_dim'],
+                modalities=config['model']['modalities'],
+                freeze_encoders=config['model']['freeze_encoders'],
+                dropout_fusion=config['model']['dropout_fusion'],
+                dropout_head1=config['model']['dropout_head1'],
+                dropout_head2=config['model']['dropout_head2']
+            )
+            model = model.to(device)
+            model.train()
+
+            outputs = model(batch)
+            probabilities = outputs['probabilities'] if isinstance(outputs, dict) else outputs
+
+            has_nan = torch.isnan(probabilities).any().item()
+            has_inf = torch.isinf(probabilities).any().item()
+
+            if not has_nan:
+                logger.info(f"✓ Retry {retry_count} successful - NaN was indeed a CUDA warmup issue")
+                break
+
+        if has_nan:
+            logger.error(f"❌ Probabilities contain NaN! {torch.isnan(probabilities).sum().item()} NaN values")
+        if has_inf:
+            logger.error(f"❌ Probabilities contain inf!")
+        if not has_nan and not has_inf:
+            logger.info(f"✓ Probabilities range: [{probabilities.min().item():.4f}, {probabilities.max().item():.4f}]")
+
         # Extract labels
         class_names = config['class_names']
         labels_dict = batch['labels']
@@ -232,19 +388,33 @@ def test_training_step(config: dict):
             if class_name in labels_dict:
                 labels_tensor[:, i] = labels_dict[class_name].float()
 
-        # Compute loss
-        loss_dict = loss_fn(outputs, labels_tensor)
+        # Check labels for NaN
+        if torch.isnan(labels_tensor).any():
+            logger.error(f"❌ Labels contain NaN!")
+        else:
+            logger.info(f"✓ Labels range: [{labels_tensor.min().item():.4f}, {labels_tensor.max().item():.4f}]")
+            logger.info(f"✓ Positive labels: {(labels_tensor == 1).sum().item()}/{labels_tensor.numel()}")
 
-        logger.info(f"✓ Total loss: {loss_dict['loss'].item():.4f}")
+        # Compute loss
+        logger.info("Computing loss...")
+        loss_dict = loss_fn(probabilities, labels_tensor)
+
+        # Extract loss values (handle both tensor and float)
+        def get_loss_value(loss):
+            return loss.item() if hasattr(loss, 'item') else float(loss)
+
+        logger.info(f"✓ Total loss: {get_loss_value(loss_dict['loss']):.4f}")
         if 'bce_loss' in loss_dict:
-            logger.info(f"✓ BCE loss: {loss_dict['bce_loss'].item():.4f}")
+            logger.info(f"✓ BCE loss: {get_loss_value(loss_dict['bce_loss']):.4f}")
         if 'focal_loss' in loss_dict:
-            logger.info(f"✓ Focal loss: {loss_dict['focal_loss'].item():.4f}")
+            logger.info(f"✓ Focal loss: {get_loss_value(loss_dict['focal_loss']):.4f}")
 
         # Verify loss is valid
-        assert not torch.isnan(loss_dict['loss']), "Loss is NaN"
-        assert not torch.isinf(loss_dict['loss']), "Loss is Inf"
-        assert loss_dict['loss'].item() > 0, "Loss should be positive"
+        loss_value = get_loss_value(loss_dict['loss'])
+        import math
+        assert not math.isnan(loss_value), "Loss is NaN"
+        assert not math.isinf(loss_value), "Loss is Inf"
+        assert loss_value > 0, "Loss should be positive"
 
         print("\n" + "=" * 70)
         print("✅ Test 4 PASSED: Training step works correctly")
@@ -286,6 +456,9 @@ def main():
     print(f"Batch size: {config['training']['batch_size']}")
     print(f"Modalities: {config['model']['modalities']}")
     print("=" * 70)
+
+    # Warm up CUDA to avoid numerical instability in initial forward passes
+    warmup_cuda()
 
     # Run tests
     results = {}

@@ -1,0 +1,133 @@
+# Lambda AI A100 Configuration
+# =============================
+# Optimized for A100 40GB/80GB instances
+# Takes advantage of larger VRAM and faster tensor cores
+
+# Model Configuration
+model:
+  name: "EnhancedMDFNet"
+  num_classes: 14
+  clinical_feature_dim: 45
+  modalities: ['vision', 'text', 'clinical']
+  freeze_encoders: true  # Stage 1: Frozen encoders
+  dropout_fusion: 0.3
+  dropout_head1: 0.3
+  dropout_head2: 0.2
+
+# Loss Configuration
+loss:
+  name: "CombinedLoss"
+  bce_weight: 0.7
+  focal_weight: 0.3
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+# Optimizer Configuration
+optimizer:
+  name: "AdamW"
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
+
+# Learning Rate Scheduler
+scheduler:
+  name: "cosine"
+  warmup_epochs: 1
+  min_lr: 1.0e-6
+
+# Training Configuration
+training:
+  max_epochs: 10
+  batch_size: 16  # Larger batch size for A100's 40GB VRAM
+  gradient_accumulation_steps: 1  # No accumulation needed with larger batches
+
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 5
+    monitor: "val_loss"  # Use val_loss instead of val_mean_auroc to avoid NaN issues with small datasets
+    mode: "min"  # Minimize loss (was "max" for AUROC)
+    min_delta: 0.001
+
+  # Gradient clipping
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: "norm"
+
+  # Mixed precision (A100 tensor cores are optimized for this)
+  precision: "16-mixed"  # Use bf16-mixed if you want bfloat16 (A100 supports it)
+
+  # Checkpointing
+  save_top_k: 3
+  save_last: true
+  monitor: "val_mean_auroc"
+  mode: "max"
+  save_interval_epochs: 2
+
+# Data Configuration
+data:
+  # UPDATE THIS PATH after uploading data to Lambda
+  data_root: "/home/ubuntu/data"
+
+  train_file: "train_final.pt"
+  val_file: "val_final.pt"
+  test_file: "test_final.pt"
+
+  # DataLoader settings (A100 instances have excellent CPUs)
+  num_workers: 12  # A100 instances typically have 12+ CPU cores
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2  # Prefetch batches for faster loading
+
+  # Data augmentation
+  augmentation:
+    enabled: true
+    horizontal_flip_prob: 0.5
+    rotation_degrees: 10
+    color_jitter:
+      brightness: 0.2
+      contrast: 0.2
+
+  use_weighted_sampler: false
+
+# Logging Configuration
+logging:
+  experiment_name: "lambda_a100_validation"
+  log_dir: "logs"
+  tensorboard_dir: "tb_logs"
+  log_every_n_steps: 10
+
+  log_lr: true
+  log_gradients: false
+  log_weights: false
+
+# Distributed Training
+distributed:
+  strategy: "auto"
+  num_nodes: 1
+  devices: 1  # Single A100
+  accelerator: "gpu"
+
+# Compute Environment (optimized for A100)
+compute:
+  deterministic: false
+  benchmark: true  # Enable cudnn benchmarking for A100 speed
+  seed: 42
+  # A100-specific optimizations
+  matmul_precision: "high"  # Use TF32 for matmul (A100 feature)
+
+# Class Names
+class_names:
+  - "No Finding"
+  - "Enlarged Cardiomediastinum"
+  - "Cardiomegaly"
+  - "Lung Opacity"
+  - "Lung Lesion"
+  - "Edema"
+  - "Consolidation"
+  - "Pneumonia"
+  - "Atelectasis"
+  - "Pneumothorax"
+  - "Pleural Effusion"
+  - "Pleural Other"
+  - "Fracture"
+  - "Support Devices"
