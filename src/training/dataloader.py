@@ -493,17 +493,50 @@ class ChunkedDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        sample = self.data[idx]
+        raw_sample = self.data[idx]
 
         # Convert format if needed
         if self.adapter:
-            sample = self.adapter.convert_sample(sample)
+            sample = self.adapter.convert_sample(raw_sample)
+        else:
+            sample = raw_sample
+
+        # Get image
+        image = sample['image']
 
         # Apply augmentation to image if specified
-        if self.augmentation and 'image' in sample:
-            sample['image'] = self.augmentation(sample['image'])
+        if self.augmentation is not None:
+            image = self.augmentation(image)
 
-        return sample
+        # Get text sequences
+        text_input_ids = sample['text_input_ids']
+        text_attention_mask = sample['text_attention_mask']
+
+        # Get clinical features
+        clinical_features = sample['clinical_features']
+
+        # Handle NaN values in clinical features
+        if torch.isnan(clinical_features).any():
+            clinical_features = torch.nan_to_num(clinical_features, nan=0.0)
+
+        # Get labels
+        labels = sample['labels']
+
+        # Metadata (with defaults for missing fields)
+        subject_id = sample.get('subject_id', -1)
+        study_id = sample.get('study_id', -1)
+        dicom_id = sample.get('dicom_id', 'unknown')
+
+        return {
+            'image': image,
+            'text_input_ids': text_input_ids,
+            'text_attention_mask': text_attention_mask,
+            'clinical_features': clinical_features,
+            'labels': labels,
+            'subject_id': subject_id,
+            'study_id': study_id,
+            'dicom_id': dicom_id
+        }
 
 
 class MIMICDataModule(pl.LightningDataModule):
