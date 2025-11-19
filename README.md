@@ -4,7 +4,7 @@ HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused w
 
 ## Recent Improvements (November 2025)
 
-**NEW: CXR-PRO Integration (4-Modal Architecture)**:
+**CXR-PRO Integration (4-Modal Architecture)**:
 - **Prior-Free Radiology Reports**: Integrated CXR-PRO dataset to remove hallucinated references to priors
 - **GILBERT Model**: Implemented BioBERT-based prior removal (HuggingFace: `rajpurkarlab/gilbert`)
 - **4-Modal Architecture**: Extended Enhanced MDF-Net with radiology impressions as 4th modality
@@ -31,13 +31,6 @@ HYPOTHESIS: Context-aware knowledge augmentation of clinical notes, when fused w
 - **Memory-Efficient Streaming**: Process 100K+ records on 7.5GB RAM without OOM crashes
 
 ### Technical Documentation
-
-**CXR-PRO Integration (NEW)**:
-- **[CXR-PRO Integration Guide](docs/CXR_PRO_INTEGRATION.md)**: Complete guide for prior-free radiology reports
-  - GILBERT model usage (BioBERT-based prior removal)
-  - Phase 1 adapter for integrating CXR-PRO impressions
-  - 4-modal Enhanced MDF-Net architecture
-  - Data quality validation and troubleshooting
 
 **Phase 3 Training Pipeline**:
 - **[Enhanced RAG Adapter](docs/ENHANCED_RAG_ADAPTER.md)**: Auto-detection and conversion between Enhanced RAG and Standard formats
@@ -66,7 +59,7 @@ This project implements data preprocessing and training for Enhanced MDF-Net mod
 - **RAG knowledge enhancement** for medical context
 - **Cross-attention fusion** for multimodal integration
 
-### 4-Modal Architecture with CXR-PRO (327M parameters) - NEW!
+### 4-Modal Architecture with CXR-PRO (327M parameters) 
 - **BiomedCLIP-CXR** vision encoder for chest X-ray analysis
 - **Clinical ModernBERT** text encoder for ED clinical notes
 - **BiomedBERT** encoder for **prior-free radiology impressions** (CXR-PRO)
@@ -89,7 +82,7 @@ The pipeline links MIMIC-CXR chest X-rays with MIMIC-IV-ED emergency department 
 - **Correct Path Construction**: Properly handles MIMIC-CXR's 8-digit padded directory structure
 - **Scalable**: Successfully processes 107,949+ matched multimodal records
 
-### CXR-PRO Integration (NEW!)
+### CXR-PRO Integration
 - **Prior-Free Radiology Reports**: Removes hallucinated references to priors using GILBERT model
 - **4-Modal Architecture**: Vision + Clinical Text + Radiology Text + Clinical Features
 - **GILBERT Model**: BioBERT-based token-level prior removal from HuggingFace
